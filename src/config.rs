@@ -111,13 +111,31 @@ impl BoundingBox {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub credentials: Credentials,
     pub bbox: BoundingBox,
     pub poll_interval: Duration,
     pub api_base: String,
     pub token_url: String,
+    /// Postgres URL. `None` runs in log-only mode.
+    pub database_url: Option<String>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("credentials", &self.credentials)
+            .field("bbox", &self.bbox)
+            .field("poll_interval", &self.poll_interval)
+            .field("api_base", &self.api_base)
+            .field("token_url", &self.token_url)
+            .field(
+                "database_url",
+                &self.database_url.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 pub const DEFAULT_API_BASE: &str = "https://opensky-network.org/api";
@@ -180,6 +198,7 @@ impl Config {
             poll_interval: Duration::from_secs(secs),
             api_base: get("OPENSKY_API_BASE").unwrap_or_else(|| DEFAULT_API_BASE.into()),
             token_url: get("OPENSKY_TOKEN_URL").unwrap_or_else(|| DEFAULT_TOKEN_URL.into()),
+            database_url: get("DATABASE_URL").filter(|s| !s.trim().is_empty()),
         })
     }
 
@@ -246,6 +265,20 @@ mod tests {
             ("AERO_LAMIN", "42"),
         ]));
         assert!(matches!(r, Err(ConfigError::BadBox(_))));
+    }
+
+    #[test]
+    fn database_url_is_optional_and_redacted() {
+        let base = [("OPENSKY_CLIENT_ID", "id"), ("OPENSKY_CLIENT_SECRET", "s")];
+        assert!(Config::from_lookup(lookup(&base))
+            .unwrap()
+            .database_url
+            .is_none());
+        let mut with = base.to_vec();
+        with.push(("DATABASE_URL", "postgres://u:pw@h/db"));
+        let c = Config::from_lookup(lookup(&with)).unwrap();
+        assert_eq!(c.database_url.as_deref(), Some("postgres://u:pw@h/db"));
+        assert!(!format!("{c:?}").contains("pw"));
     }
 
     #[test]
