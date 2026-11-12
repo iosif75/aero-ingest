@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aero
+      POSTGRES_PASSWORD: aero
+      POSTGRES_DB: aero
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - aero-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aero -d aero"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  aero-pg:

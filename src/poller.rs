@@ -3,6 +3,7 @@
 use crate::client::{FetchError, OpenSkyClient, Snapshot};
 use crate::config::BoundingBox;
 use crate::model::StateVector;
+use crate::storage::Store;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::{self, MissedTickBehavior};
@@ -47,6 +48,7 @@ pub enum Exit {
 /// Poll until `shutdown` resolves or a fatal error occurs.
 pub async fn run(
     client: &OpenSkyClient,
+    store: Option<&Store>,
     bbox: BoundingBox,
     every: Duration,
     shutdown: impl Future<Output = ()>,
@@ -63,7 +65,12 @@ pub async fn run(
         }
 
         match client.fetch_states(&bbox).await {
-            Ok(snap) => log_snapshot(&snap),
+            Ok(snap) => {
+                log_snapshot(&snap);
+                if let Some(store) = store {
+                    persist(store, &snap).await;
+                }
+            }
             Err(FetchError::Fatal(msg)) => return Exit::Fatal(msg),
             Err(FetchError::RateLimited { retry_after }) => {
                 tracing::warn!(
@@ -80,6 +87,21 @@ pub async fn run(
                 tracing::warn!(error = %msg, "poll failed, will retry next tick");
             }
         }
+    }
+}
+
+/// Write a snapshot. A database error is logged and the poll loop carries on;
+/// that snapshot is lost, which is acceptable for a 60 s sampled feed.
+async fn persist(store: &Store, snap: &Snapshot) {
+    let r = &snap.response;
+    match store.insert_snapshot(r.time, &r.states).await {
+        Ok(w) => tracing::info!(
+            candidates = w.candidates,
+            inserted = w.inserted,
+            duplicates = w.candidates as u64 - w.inserted,
+            "stored snapshot"
+        ),
+        Err(e) => tracing::error!(error = %e, "failed to store snapshot"),
     }
 }
 

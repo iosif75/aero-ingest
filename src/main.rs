@@ -2,6 +2,7 @@ use aero_ingest::auth::TokenManager;
 use aero_ingest::client::OpenSkyClient;
 use aero_ingest::config::Config;
 use aero_ingest::poller::{self, Exit};
+use aero_ingest::storage::Store;
 use std::process::ExitCode;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -49,6 +50,23 @@ async fn main() -> ExitCode {
         }
     };
 
+    let store = match config.database_url.as_deref() {
+        Some(url) => match Store::connect(url).await {
+            Ok(s) => {
+                tracing::info!("connected to Postgres, migrations applied");
+                Some(s)
+            }
+            Err(e) => {
+                tracing::error!("could not connect to Postgres: {e}");
+                return ExitCode::from(3);
+            }
+        },
+        None => {
+            tracing::warn!("DATABASE_URL not set, running in log-only mode");
+            None
+        }
+    };
+
     let auth = TokenManager::new(http.clone(), &config.token_url, config.credentials.clone());
     let client = OpenSkyClient::new(http, &config.api_base, auth);
 
@@ -57,7 +75,15 @@ async fn main() -> ExitCode {
         tracing::info!("shutdown requested");
     };
 
-    match poller::run(&client, config.bbox, config.poll_interval, shutdown).await {
+    match poller::run(
+        &client,
+        store.as_ref(),
+        config.bbox,
+        config.poll_interval,
+        shutdown,
+    )
+    .await
+    {
         Exit::Shutdown => ExitCode::SUCCESS,
         Exit::Fatal(msg) => {
             tracing::error!("stopping: {msg}");

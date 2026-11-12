@@ -49,6 +49,19 @@ impl From<u8> for PositionSource {
     }
 }
 
+impl PositionSource {
+    /// The numeric code OpenSky uses.
+    pub fn code(self) -> i16 {
+        match self {
+            Self::AdsB => 0,
+            Self::Asterix => 1,
+            Self::Mlat => 2,
+            Self::Flarm => 3,
+            Self::Unknown(v) => i16::from(v),
+        }
+    }
+}
+
 /// One aircraft's state, with OpenSky's nulls kept as `Option`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateVector {
