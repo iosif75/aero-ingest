@@ -1,7 +1,12 @@
-//! `/health` and `/metrics` endpoints.
+//! HTTP API: `/health`, `/metrics`, and the read-only query endpoints.
+//!
+//! There is no authentication, so keep it bound to localhost (the default)
+//! or behind a reverse proxy.
 
 use crate::metrics::{now_unix, Metrics};
-use axum::extract::State;
+use crate::query::{parse_icao24, BoxParams, Window, WindowParams};
+use crate::storage::{Position, Store};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -15,13 +20,100 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     /// Report unhealthy when the last success is older than this.
     pub max_silence: Duration,
+    /// `None` in log-only mode; query endpoints then answer 503.
+    pub store: Option<Store>,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
+        .route("/aircraft/{icao24}/track", get(track))
+        .route("/positions", get(positions))
         .with_state(state)
+}
+
+/// A JSON error body with a status code.
+pub struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+fn bad_request(msg: String) -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, msg)
+}
+
+fn store(s: &AppState) -> Result<&Store, ApiError> {
+    s.store.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage is disabled (DATABASE_URL not set)".into(),
+        )
+    })
+}
+
+fn db_error(e: sqlx::Error) -> ApiError {
+    tracing::error!(error = %e, "query failed");
+    ApiError(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "database query failed".into(),
+    )
+}
+
+#[derive(Debug, Serialize)]
+pub struct PositionsResponse {
+    pub from: i64,
+    pub to: i64,
+    pub count: usize,
+    /// True if more rows matched than `limit`; narrow the window to get the rest.
+    pub truncated: bool,
+    pub positions: Vec<Position>,
+}
+
+impl PositionsResponse {
+    fn new(w: Window, mut rows: Vec<Position>) -> Self {
+        let truncated = rows.len() as i64 > w.limit;
+        rows.truncate(w.limit as usize);
+        Self {
+            from: w.from,
+            to: w.to,
+            count: rows.len(),
+            truncated,
+            positions: rows,
+        }
+    }
+}
+
+/// `GET /aircraft/{icao24}/track?from=&to=&limit=`
+async fn track(
+    State(s): State<AppState>,
+    Path(icao24): Path<String>,
+    Query(p): Query<WindowParams>,
+) -> Result<Json<PositionsResponse>, ApiError> {
+    let icao24 = parse_icao24(&icao24).map_err(bad_request)?;
+    let w = p.resolve(now_unix()).map_err(bad_request)?;
+    let rows = store(&s)?
+        .track(&icao24, w.from, w.to, w.limit)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(PositionsResponse::new(w, rows)))
+}
+
+/// `GET /positions?lamin=&lomin=&lamax=&lomax=&from=&to=&limit=`
+async fn positions(
+    State(s): State<AppState>,
+    Query(p): Query<BoxParams>,
+) -> Result<Json<PositionsResponse>, ApiError> {
+    let bbox = p.bbox().map_err(bad_request)?;
+    let w = p.window().resolve(now_unix()).map_err(bad_request)?;
+    let rows = store(&s)?
+        .in_box(&bbox, w.from, w.to, w.limit)
+        .await
+        .map_err(db_error)?;
+    Ok(Json(PositionsResponse::new(w, rows)))
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]

@@ -98,6 +98,7 @@ async fn main() -> ExitCode {
     let app = api::router(AppState {
         metrics: metrics.clone(),
         max_silence: config.max_silence(),
+        store: store.clone(),
     });
     let server = tokio::spawn(
         axum::serve(listener, app)

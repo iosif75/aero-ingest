@@ -7,4 +7,5 @@ pub mod http;
 pub mod metrics;
 pub mod model;
 pub mod poller;
+pub mod query;
 pub mod storage;
