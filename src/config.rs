@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
@@ -120,6 +121,8 @@ pub struct Config {
     pub token_url: String,
     /// Postgres URL. `None` runs in log-only mode.
     pub database_url: Option<String>,
+    /// Where `/health` and `/metrics` listen.
+    pub http_addr: SocketAddr,
 }
 
 impl fmt::Debug for Config {
@@ -137,6 +140,8 @@ impl fmt::Debug for Config {
             .finish()
     }
 }
+
+pub const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:9090";
 
 pub const DEFAULT_API_BASE: &str = "https://opensky-network.org/api";
 pub const DEFAULT_TOKEN_URL: &str =
@@ -199,7 +204,19 @@ impl Config {
             api_base: get("OPENSKY_API_BASE").unwrap_or_else(|| DEFAULT_API_BASE.into()),
             token_url: get("OPENSKY_TOKEN_URL").unwrap_or_else(|| DEFAULT_TOKEN_URL.into()),
             database_url: get("DATABASE_URL").filter(|s| !s.trim().is_empty()),
+            http_addr: match get("AERO_HTTP_ADDR") {
+                None => DEFAULT_HTTP_ADDR.parse().expect("valid default"),
+                Some(v) => v.trim().parse().map_err(|_| ConfigError::Invalid {
+                    name: "AERO_HTTP_ADDR",
+                    value: v,
+                })?,
+            },
         })
+    }
+
+    /// `/health` turns unhealthy after this long without a successful poll.
+    pub fn max_silence(&self) -> Duration {
+        (self.poll_interval * 3).max(Duration::from_secs(180))
     }
 
     /// Credits used per day at the configured interval.
@@ -279,6 +296,22 @@ mod tests {
         let c = Config::from_lookup(lookup(&with)).unwrap();
         assert_eq!(c.database_url.as_deref(), Some("postgres://u:pw@h/db"));
         assert!(!format!("{c:?}").contains("pw"));
+    }
+
+    #[test]
+    fn http_addr_default_and_override() {
+        let base = [("OPENSKY_CLIENT_ID", "id"), ("OPENSKY_CLIENT_SECRET", "s")];
+        let c = Config::from_lookup(lookup(&base)).unwrap();
+        assert_eq!(c.http_addr.to_string(), "127.0.0.1:9090");
+        assert_eq!(c.max_silence(), Duration::from_secs(180));
+        let mut with = base.to_vec();
+        with.push(("AERO_HTTP_ADDR", "0.0.0.0:8080"));
+        assert_eq!(
+            Config::from_lookup(lookup(&with)).unwrap().http_addr.port(),
+            8080
+        );
+        let bad = [base[0], base[1], ("AERO_HTTP_ADDR", "nope")];
+        assert!(Config::from_lookup(lookup(&bad)).is_err());
     }
 
     #[test]
