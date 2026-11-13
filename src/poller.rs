@@ -2,9 +2,11 @@
 
 use crate::client::{FetchError, OpenSkyClient, Snapshot};
 use crate::config::BoundingBox;
+use crate::metrics::{now_unix, Metrics};
 use crate::model::StateVector;
 use crate::storage::Store;
 use std::future::Future;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 use tokio::time::{self, MissedTickBehavior};
 
@@ -45,10 +47,30 @@ pub enum Exit {
     Fatal(String),
 }
 
+/// Waits before each retry of a transient failure within one tick.
+///
+/// Doubles from 2 s, and stops once the total wait would pass half the poll
+/// interval, so retries never run into the next tick.
+pub fn retry_delays(interval: Duration) -> Vec<Duration> {
+    let budget = interval / 2;
+    let mut out = Vec::new();
+    let mut total = Duration::ZERO;
+    let mut next = Duration::from_secs(2);
+    while out.len() < MAX_RETRIES && total + next <= budget {
+        total += next;
+        out.push(next);
+        next *= 2;
+    }
+    out
+}
+
+const MAX_RETRIES: usize = 3;
+
 /// Poll until `shutdown` resolves or a fatal error occurs.
 pub async fn run(
     client: &OpenSkyClient,
     store: Option<&Store>,
+    metrics: &Metrics,
     bbox: BoundingBox,
     every: Duration,
     shutdown: impl Future<Output = ()>,
@@ -57,6 +79,7 @@ pub async fn run(
     let mut ticker = time::interval(every);
     // After a long pause (rate limit, slow request), don't fire a burst of catch-up polls.
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let delays = retry_delays(every);
 
     loop {
         tokio::select! {
@@ -64,15 +87,34 @@ pub async fn run(
             _ = ticker.tick() => {}
         }
 
-        match client.fetch_states(&bbox).await {
+        let mut attempt = 0;
+        let result = loop {
+            match client.fetch_states(&bbox).await {
+                Err(FetchError::Transient(msg)) if attempt < delays.len() => {
+                    let wait = delays[attempt];
+                    attempt += 1;
+                    metrics.fetch_retries.fetch_add(1, Relaxed);
+                    tracing::warn!(error = %msg, attempt, retry_in_s = wait.as_secs(), "poll failed, retrying");
+                    tokio::select! {
+                        _ = &mut shutdown => return Exit::Shutdown,
+                        _ = time::sleep(wait) => {}
+                    }
+                }
+                other => break other,
+            }
+        };
+
+        match result {
             Ok(snap) => {
-                log_snapshot(&snap);
+                let s = log_snapshot(&snap);
+                metrics.record_success(now_unix(), s.total, s.stale, snap.credits_remaining);
                 if let Some(store) = store {
-                    persist(store, &snap).await;
+                    persist(store, metrics, &snap).await;
                 }
             }
             Err(FetchError::Fatal(msg)) => return Exit::Fatal(msg),
             Err(FetchError::RateLimited { retry_after }) => {
+                metrics.record_rate_limited(now_unix() + retry_after.as_secs() as i64);
                 tracing::warn!(
                     retry_after_s = retry_after.as_secs(),
                     "out of OpenSky credits, pausing"
@@ -84,7 +126,8 @@ pub async fn run(
                 ticker.reset();
             }
             Err(FetchError::Transient(msg)) => {
-                tracing::warn!(error = %msg, "poll failed, will retry next tick");
+                metrics.polls_failed.fetch_add(1, Relaxed);
+                tracing::error!(error = %msg, "poll failed after retries, skipping this tick");
             }
         }
     }
@@ -92,20 +135,28 @@ pub async fn run(
 
 /// Write a snapshot. A database error is logged and the poll loop carries on;
 /// that snapshot is lost, which is acceptable for a 60 s sampled feed.
-async fn persist(store: &Store, snap: &Snapshot) {
+async fn persist(store: &Store, metrics: &Metrics, snap: &Snapshot) {
     let r = &snap.response;
     match store.insert_snapshot(r.time, &r.states).await {
-        Ok(w) => tracing::info!(
-            candidates = w.candidates,
-            inserted = w.inserted,
-            duplicates = w.candidates as u64 - w.inserted,
-            "stored snapshot"
-        ),
-        Err(e) => tracing::error!(error = %e, "failed to store snapshot"),
+        Ok(w) => {
+            let dup = w.candidates as u64 - w.inserted;
+            metrics.rows_inserted.fetch_add(w.inserted, Relaxed);
+            metrics.rows_duplicate.fetch_add(dup, Relaxed);
+            tracing::info!(
+                candidates = w.candidates,
+                inserted = w.inserted,
+                duplicates = dup,
+                "stored snapshot"
+            );
+        }
+        Err(e) => {
+            metrics.db_errors.fetch_add(1, Relaxed);
+            tracing::error!(error = %e, "failed to store snapshot");
+        }
     }
 }
 
-fn log_snapshot(snap: &Snapshot) {
+fn log_snapshot(snap: &Snapshot) -> PollSummary {
     let r = &snap.response;
     let s = summarize(r.time, &r.states);
     tracing::info!(
@@ -130,12 +181,22 @@ fn log_snapshot(snap: &Snapshot) {
             "aircraft"
         );
     }
+    s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::StatesResponse;
+
+    #[test]
+    fn retry_delays_fit_in_half_the_interval() {
+        let secs = |v: Vec<Duration>| v.iter().map(|d| d.as_secs()).collect::<Vec<_>>();
+        assert_eq!(secs(retry_delays(Duration::from_secs(60))), vec![2, 4, 8]);
+        assert_eq!(secs(retry_delays(Duration::from_secs(10))), vec![2]);
+        assert_eq!(secs(retry_delays(Duration::from_secs(5))), vec![2]);
+        assert!(retry_delays(Duration::from_secs(3)).is_empty());
+    }
 
     #[test]
     fn counts_positions_stale_and_ground() {
