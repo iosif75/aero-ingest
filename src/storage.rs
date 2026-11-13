@@ -174,3 +174,77 @@ impl Columns {
         self.category.push(s.category.map(i16::from));
     }
 }
+
+/// One stored position, as returned by the query API.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, sqlx::FromRow)]
+pub struct Position {
+    pub icao24: String,
+    /// Unix seconds.
+    pub time: i64,
+    pub callsign: Option<String>,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub baro_altitude: Option<f64>,
+    pub geo_altitude: Option<f64>,
+    pub velocity: Option<f64>,
+    pub true_track: Option<f64>,
+    pub vertical_rate: Option<f64>,
+    pub on_ground: bool,
+    pub squawk: Option<String>,
+    pub category: Option<i16>,
+}
+
+const POSITION_COLUMNS: &str =
+    "icao24, extract(epoch FROM time_position)::bigint AS time, callsign, \
+     latitude, longitude, baro_altitude, geo_altitude, velocity, true_track, vertical_rate, \
+     on_ground, squawk, category";
+
+impl Store {
+    /// Positions of one aircraft in `[from, to]` (unix seconds), oldest first.
+    /// Fetches up to `limit + 1` rows so the caller can tell if it was cut off.
+    pub async fn track(
+        &self,
+        icao24: &str,
+        from: i64,
+        to: i64,
+        limit: i64,
+    ) -> Result<Vec<Position>, sqlx::Error> {
+        sqlx::query_as::<_, Position>(&format!(
+            "SELECT {POSITION_COLUMNS} FROM state_vectors \
+             WHERE icao24 = $1 AND time_position BETWEEN to_timestamp($2) AND to_timestamp($3) \
+             ORDER BY time_position LIMIT $4"
+        ))
+        .bind(icao24)
+        .bind(from as f64)
+        .bind(to as f64)
+        .bind(limit + 1)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Every position inside the box in `[from, to]`, ordered by time then aircraft.
+    /// Fetches up to `limit + 1` rows so the caller can tell if it was cut off.
+    pub async fn in_box(
+        &self,
+        bbox: &crate::config::BoundingBox,
+        from: i64,
+        to: i64,
+        limit: i64,
+    ) -> Result<Vec<Position>, sqlx::Error> {
+        sqlx::query_as::<_, Position>(&format!(
+            "SELECT {POSITION_COLUMNS} FROM state_vectors \
+             WHERE time_position BETWEEN to_timestamp($1) AND to_timestamp($2) \
+               AND latitude BETWEEN $3 AND $4 AND longitude BETWEEN $5 AND $6 \
+             ORDER BY time_position, icao24 LIMIT $7"
+        ))
+        .bind(from as f64)
+        .bind(to as f64)
+        .bind(bbox.lamin)
+        .bind(bbox.lamax)
+        .bind(bbox.lomin)
+        .bind(bbox.lomax)
+        .bind(limit + 1)
+        .fetch_all(&self.pool)
+        .await
+    }
+}

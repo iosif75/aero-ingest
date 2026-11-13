@@ -3,8 +3,8 @@
 A small Rust daemon that polls the [OpenSky Network](https://opensky-network.org) REST API for aircraft
 around Barcelona–El Prat and logs what it sees. It is the ingestion layer for Aeroscan.
 
-Status: steps 1–4 of the plan (OAuth2 token manager, poll loop, state-vector parsing, Postgres storage,
-retries, `/health` and Prometheus metrics). The query API comes next.
+Status: steps 1–5 of the plan: OAuth2 token manager, poll loop, state-vector parsing, Postgres storage,
+retries, `/health`, Prometheus metrics, and a read-only query API.
 
 ## Setup
 
@@ -51,19 +51,48 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
 - **Metrics** (`GET /metrics`, `src/metrics.rs`): Prometheus text format. Counters for polls ok/failed/rate-limited,
   retries, rows inserted/duplicate and DB errors; gauges for aircraft and stale positions on the last poll, credits
   remaining, last success time and start time.
+- **Query API** (`src/http.rs`, `src/query.rs`): see below.
 - **Poll loop** (`src/poller.rs`): logs aircraft count, how many have a position, how many positions are stale
   (> 60 s old), how many are on the ground, and credits remaining. Ctrl+C exits cleanly.
 
 Exit codes: `0` clean shutdown, `1` fatal auth error, `2` bad configuration, `3` can't reach Postgres at startup,
 `4` can't bind the HTTP address.
 
+## Query API
+
+Times are Unix seconds and both bounds are inclusive. `to` defaults to now, `from` to `to` minus 2 hours. One
+request may cover at most 24 hours. `limit` defaults to 5,000 (max 50,000). If more rows match, the response
+has `"truncated": true`, so narrow the window to get the rest.
+
+```
+GET /aircraft/{icao24}/track?from=&to=&limit=
+GET /positions?lamin=&lomin=&lamax=&lomax=&from=&to=&limit=
+```
+
+Example: `curl "localhost:9090/aircraft/3423c4/track"` for the last two hours of one aircraft.
+
+```json
+{
+  "from": 1731392800, "to": 1731400000, "count": 1, "truncated": false,
+  "positions": [
+    { "icao24": "3423c4", "time": 1731399995, "callsign": "VLG12AB", "latitude": 41.2971, "longitude": 2.0785,
+      "baro_altitude": 1150.6, "geo_altitude": 1188.7, "velocity": 92.5, "true_track": 248.1,
+      "vertical_rate": -4.2, "on_ground": false, "squawk": "1000", "category": 4 }
+  ]
+}
+```
+
+Track results are oldest first. Box results are ordered by time, then by aircraft. Bad parameters return 400 with
+`{"error": "..."}`, and with no `DATABASE_URL` the query endpoints return 503. The API has no authentication, so
+keep it on localhost (the default) or behind a reverse proxy.
+
 ## Tests
 
 `cargo test` runs unit tests plus integration tests against a fake OpenSky server on localhost
-(token caching, 401 retry, fatal 401, 429 retry header, connection errors, retry after a 503, and the `/health`
-and `/metrics` endpoints). They don't touch the real API.
+(token caching, 401 retry, fatal 401, 429 retry header, connection errors, retry after a 503, the `/health`
+and `/metrics` endpoints, and query parameter validation). They don't touch the real API.
 
-Storage tests need a Postgres and are skipped otherwise:
+Storage and query API tests need a Postgres and are skipped otherwise:
 
 ```
 docker compose up -d

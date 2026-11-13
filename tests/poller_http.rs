@@ -98,6 +98,7 @@ async fn health_and_metrics_endpoints() {
     let app = router(AppState {
         metrics: metrics.clone(),
         max_silence: Duration::from_secs(180),
+        store: None,
     });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
