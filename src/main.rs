@@ -17,6 +17,9 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
+/// How long open HTTP requests may take to finish at shutdown.
+const SERVER_DRAIN: Duration = Duration::from_secs(5);
+
 /// Standard accounts get this many OpenSky credits a day.
 const DAILY_CREDIT_BUDGET: u64 = 4_000;
 
@@ -121,9 +124,18 @@ async fn run() -> Result<Exit, StartupError> {
     )
     .await;
 
-    server.abort();
     if let Some(p) = pruner {
         p.abort();
+    }
+    match exit {
+        // Let in-flight API requests finish; the server already saw the signal.
+        Exit::Shutdown => {
+            if tokio::time::timeout(SERVER_DRAIN, server).await.is_err() {
+                tracing::warn!("HTTP server did not finish draining in time");
+            }
+        }
+        // A fatal error doesn't trigger the shutdown signal, so stop it directly.
+        Exit::Fatal(_) => server.abort(),
     }
     Ok(exit)
 }

@@ -10,6 +10,9 @@ pub const MAX_WINDOW_SECS: i64 = 24 * 3600;
 /// Window used when `from` is omitted.
 pub const DEFAULT_WINDOW_SECS: i64 = 2 * 3600;
 pub const DEFAULT_LIMIT: i64 = 5_000;
+/// Accepted timestamps: 1970-01-01 to 9999-12-31, which Postgres can store.
+pub const MIN_TIME: i64 = 0;
+pub const MAX_TIME: i64 = 253_402_300_799;
 pub const MAX_LIMIT: i64 = 50_000;
 
 #[derive(Debug, Default, Deserialize)]
@@ -42,8 +45,17 @@ pub struct Window {
 
 impl WindowParams {
     pub fn resolve(&self, now: i64) -> Result<Window, String> {
+        let in_range = |t: i64| (MIN_TIME..=MAX_TIME).contains(&t);
         let to = self.to.unwrap_or(now);
-        let from = self.from.unwrap_or(to - DEFAULT_WINDOW_SECS);
+        if !in_range(to) {
+            return Err(format!("`to` must be between {MIN_TIME} and {MAX_TIME}"));
+        }
+        let from = self
+            .from
+            .unwrap_or_else(|| (to - DEFAULT_WINDOW_SECS).max(MIN_TIME));
+        if !in_range(from) {
+            return Err(format!("`from` must be between {MIN_TIME} and {MAX_TIME}"));
+        }
         if from > to {
             return Err("`from` must not be after `to`".into());
         }
@@ -116,6 +128,17 @@ mod tests {
         assert!(p(Some(0), Some(MAX_WINDOW_SECS), None).resolve(0).is_ok());
         assert!(p(None, None, Some(0)).resolve(0).is_err());
         assert!(p(None, None, Some(MAX_LIMIT + 1)).resolve(0).is_err());
+    }
+
+    #[test]
+    fn default_window_is_clamped_at_the_epoch() {
+        let w = WindowParams {
+            to: Some(100),
+            ..Default::default()
+        }
+        .resolve(0)
+        .unwrap();
+        assert_eq!((w.from, w.to), (0, 100));
     }
 
     #[test]

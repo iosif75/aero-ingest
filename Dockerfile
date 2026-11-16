@@ -14,7 +14,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # ---- runtime ----
 FROM debian:bookworm-slim
-RUN useradd --system --uid 10001 --no-create-home aero
+RUN groupadd --system --gid 10001 aero \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home aero
 # TLS roots come from the build image, so the runtime stage needs no apt.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /usr/local/bin/aero-ingest /usr/local/bin/aero-ingest

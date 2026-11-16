@@ -11,20 +11,43 @@ use serde::Deserialize;
 use std::fmt;
 
 /// Top-level response of `GET /states/all`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct StatesResponse {
     /// Unix time (seconds) the snapshot refers to.
     pub time: i64,
-    /// `null` when no aircraft are in the box.
-    #[serde(default, deserialize_with = "null_as_empty")]
+    /// Parsed rows. Empty when OpenSky sends `null` (no aircraft in the box).
     pub states: Vec<StateVector>,
+    /// Rows that could not be parsed and were dropped. One malformed row
+    /// must not cost the whole snapshot.
+    pub skipped: usize,
 }
 
-fn null_as_empty<'de, D>(d: D) -> Result<Vec<StateVector>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<Vec<StateVector>>::deserialize(d)?.unwrap_or_default())
+impl<'de> Deserialize<'de> for StatesResponse {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            time: i64,
+            #[serde(default)]
+            states: Option<Vec<serde_json::Value>>,
+        }
+        let raw = Raw::deserialize(d)?;
+        let mut states = Vec::new();
+        let mut skipped = 0;
+        for row in raw.states.unwrap_or_default() {
+            match StateVector::deserialize(&row) {
+                Ok(s) => states.push(s),
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(error = %e, row = %row, "skipping malformed state vector");
+                }
+            }
+        }
+        Ok(Self {
+            time: raw.time,
+            states,
+            skipped,
+        })
+    }
 }
 
 /// Origin of a position report.

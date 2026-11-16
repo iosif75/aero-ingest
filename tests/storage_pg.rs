@@ -162,3 +162,23 @@ async fn prune_once_counts_in_metrics() {
     assert_eq!(n, Some(2));
     assert!(m.render().contains("aero_rows_pruned_total 2\n"));
 }
+
+#[tokio::test]
+async fn duplicate_rows_within_one_snapshot_insert_once() {
+    let Some(store) = store().await else {
+        return;
+    };
+    let row = r#"["3423c4","VLG12AB","Spain",1000,1000,2.0,41.0,null,false,null,null,null,null,null,null,false,0]"#;
+    let snap = snapshot(&format!(r#"{{"time":1000,"states":[{row},{row}]}}"#));
+    let w = store
+        .insert_snapshot(snap.time, &snap.states)
+        .await
+        .unwrap();
+    assert_eq!(
+        w,
+        WriteStats {
+            candidates: 2,
+            inserted: 1
+        }
+    );
+}

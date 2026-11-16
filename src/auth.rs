@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 pub const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 /// Used when the token response has no `expires_in`.
 const FALLBACK_LIFETIME: Duration = Duration::from_secs(30 * 60);
+/// Upper bound on a token's lifetime, whatever the server claims.
+const MAX_LIFETIME: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -96,7 +98,9 @@ impl TokenManager {
             .map_err(|e| AuthError::Transient(e.to_string()))?;
 
         let status = resp.status();
-        if status.is_client_error() {
+        // Only these mean the credentials themselves are bad. Other 4xx codes
+        // (429 throttling, 408 timeout) are temporary.
+        if matches!(status.as_u16(), 400 | 401 | 403) {
             let body = resp.text().await.unwrap_or_default();
             return Err(AuthError::Rejected {
                 status: status.as_u16(),
@@ -113,7 +117,8 @@ impl TokenManager {
         let lifetime = tr
             .expires_in
             .map(Duration::from_secs)
-            .unwrap_or(FALLBACK_LIFETIME);
+            .unwrap_or(FALLBACK_LIFETIME)
+            .min(MAX_LIFETIME);
         tracing::info!(
             expires_in_s = lifetime.as_secs(),
             "obtained OpenSky access token"

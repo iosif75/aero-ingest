@@ -20,6 +20,7 @@ pub struct Metrics {
     pub rows_duplicate: AtomicU64,
     pub db_errors: AtomicU64,
     pub rows_pruned: AtomicU64,
+    pub rows_skipped: AtomicU64,
     pub prune_errors: AtomicU64,
     pub aircraft_last_poll: AtomicU64,
     pub stale_last_poll: AtomicU64,
@@ -53,6 +54,7 @@ impl Metrics {
             rows_duplicate: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
             rows_pruned: AtomicU64::new(0),
+            rows_skipped: AtomicU64::new(0),
             prune_errors: AtomicU64::new(0),
             aircraft_last_poll: AtomicU64::new(0),
             stale_last_poll: AtomicU64::new(0),
@@ -143,6 +145,11 @@ impl Metrics {
             "aero_rows_pruned_total",
             "Old state vectors deleted by retention.",
             self.rows_pruned.load(Relaxed),
+        );
+        counter(
+            "aero_rows_skipped_total",
+            "Malformed state vectors dropped while parsing.",
+            self.rows_skipped.load(Relaxed),
         );
         counter(
             "aero_prune_errors_total",

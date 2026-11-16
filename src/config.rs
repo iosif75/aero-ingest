@@ -10,7 +10,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("could not read credentials file {path}: {source}")]
+    #[error("could not read credentials file {path}: {source}{}", permission_hint(.source))]
     CredentialsRead {
         path: String,
         source: std::io::Error,
@@ -26,6 +26,14 @@ pub enum ConfigError {
     Invalid { name: &'static str, value: String },
     #[error("invalid bounding box: {0}")]
     BadBox(String),
+}
+
+fn permission_hint(e: &std::io::Error) -> &'static str {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        " (in Docker, set AERO_UID/AERO_GID to the file's owner, see README)"
+    } else {
+        ""
+    }
 }
 
 impl ConfigError {
