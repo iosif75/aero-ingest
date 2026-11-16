@@ -1,5 +1,7 @@
 # aero-ingest
 
+[![CI](https://github.com/iosif75/aero-ingest/actions/workflows/ci.yml/badge.svg)](https://github.com/iosif75/aero-ingest/actions/workflows/ci.yml)
+
 A small Rust daemon that polls the [OpenSky Network](https://opensky-network.org) REST API for aircraft
 around Barcelona–El Prat and logs what it sees. It is the ingestion layer for Aeroscan.
 
