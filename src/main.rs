@@ -16,6 +16,12 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> ExitCode {
     // .env is optional; real env vars win.
     let _ = dotenvy::dotenv();
+
+    // `aero-ingest healthcheck`: probe a running instance's /health, for
+    // container health checks (the runtime image has no curl).
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return healthcheck().await;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -85,11 +91,11 @@ async fn main() -> ExitCode {
     };
     tracing::info!(addr = %config.http_addr, "serving /health and /metrics");
 
-    // Ctrl+C stops both the poll loop and the HTTP server.
+    // Ctrl+C or SIGTERM (`docker stop`) stops the poll loop, pruner and HTTP server.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutdown requested");
+        let signal = shutdown_signal().await;
+        tracing::info!(signal, "shutdown requested");
         let _ = stop_tx.send(true);
     });
     let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
@@ -146,5 +152,66 @@ async fn main() -> ExitCode {
             tracing::error!("stopping: {msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Exit 0 if the local `/health` answers 200, 1 otherwise.
+async fn healthcheck() -> ExitCode {
+    let addr = std::env::var("AERO_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:9090".into());
+    let mut addr: std::net::SocketAddr = match addr.trim().parse() {
+        Ok(a) => a,
+        Err(_) => {
+            eprintln!("invalid AERO_HTTP_ADDR {addr:?}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // A server listening on all interfaces is reachable on loopback.
+    if addr.ip().is_unspecified() {
+        addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("could not build HTTP client: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match client.get(format!("http://{addr}/health")).send().await {
+        Ok(r) if r.status().is_success() => ExitCode::SUCCESS,
+        Ok(r) => {
+            eprintln!("unhealthy: HTTP {}", r.status());
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("health check failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Resolve on the first shutdown signal and return its name.
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => "SIGINT",
+                _ = term.recv() => "SIGTERM",
+            },
+            Err(e) => {
+                tracing::warn!("cannot listen for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                "SIGINT"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl+C"
     }
 }
