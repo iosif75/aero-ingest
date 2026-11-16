@@ -1,8 +1,9 @@
 //! OpenSky REST client for `/states/all`.
 
-use crate::auth::{truncate, AuthError, TokenManager};
+use crate::auth::{AuthError, TokenManager};
 use crate::config::BoundingBox;
 use crate::model::StatesResponse;
+use crate::util::truncate;
 use reqwest::{header::HeaderMap, StatusCode};
 use std::time::Duration;
 use thiserror::Error;

@@ -1,5 +1,6 @@
 //! Postgres storage for state vectors.
 
+use crate::config::BoundingBox;
 use crate::model::StateVector;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::time::Duration;
@@ -226,7 +227,7 @@ impl Store {
     /// Fetches up to `limit + 1` rows so the caller can tell if it was cut off.
     pub async fn in_box(
         &self,
-        bbox: &crate::config::BoundingBox,
+        bbox: &BoundingBox,
         from: i64,
         to: i64,
         limit: i64,

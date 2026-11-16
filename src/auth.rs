@@ -5,6 +5,7 @@
 //! is the only supported login.
 
 use crate::config::Credentials;
+use crate::util::truncate;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -121,13 +122,6 @@ impl TokenManager {
             value: tr.access_token,
             refresh_at: refresh_deadline(Instant::now(), lifetime),
         })
-    }
-}
-
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_string(),
     }
 }
 

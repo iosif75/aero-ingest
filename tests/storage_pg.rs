@@ -4,45 +4,14 @@
 //! `TEST_DATABASE_URL=postgres://aero:aero@localhost:5432/aero cargo test`.
 //! Without it they are skipped. Each test works in its own throwaway schema.
 
-use aero_ingest::model::StatesResponse;
+mod common;
+
 use aero_ingest::storage::{Store, WriteStats, MIGRATOR};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Executor, Row};
-use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use common::snapshot;
+use sqlx::Row;
 
-static SEQ: AtomicU32 = AtomicU32::new(0);
-
-async fn store() -> Option<(Store, String)> {
-    let url = std::env::var("TEST_DATABASE_URL").ok()?;
-    let schema = format!(
-        "aero_test_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::SeqCst)
-    );
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .unwrap();
-    admin
-        .execute(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}").as_str())
-        .await
-        .unwrap();
-    let opts = PgConnectOptions::from_str(&url)
-        .unwrap()
-        .options([("search_path", schema.as_str())]);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(opts)
-        .await
-        .unwrap();
-    MIGRATOR.run(&pool).await.unwrap();
-    Some((Store::from_pool(pool), schema))
-}
-
-fn snapshot(json: &str) -> StatesResponse {
-    serde_json::from_str(json).unwrap()
+async fn store() -> Option<Store> {
+    common::test_store().await
 }
 
 const FIRST: &str = r#"{"time":1731400000,"states":[
@@ -59,7 +28,7 @@ const SECOND: &str = r#"{"time":1731400060,"states":[
 
 #[tokio::test]
 async fn inserts_positions_and_drops_duplicates() {
-    let Some((store, _)) = store().await else {
+    let Some(store) = store().await else {
         eprintln!("TEST_DATABASE_URL not set, skipping");
         return;
     };
@@ -118,7 +87,7 @@ async fn inserts_positions_and_drops_duplicates() {
 
 #[tokio::test]
 async fn empty_snapshot_is_a_no_op() {
-    let Some((store, _)) = store().await else {
+    let Some(store) = store().await else {
         return;
     };
     let w = store.insert_snapshot(1, &[]).await.unwrap();
@@ -127,7 +96,7 @@ async fn empty_snapshot_is_a_no_op() {
 
 #[tokio::test]
 async fn migrations_are_idempotent() {
-    let Some((store, _)) = store().await else {
+    let Some(store) = store().await else {
         return;
     };
     MIGRATOR.run(store.pool()).await.unwrap();
@@ -135,7 +104,7 @@ async fn migrations_are_idempotent() {
 
 #[tokio::test]
 async fn prune_deletes_only_old_rows_in_batches() {
-    let Some((store, _)) = store().await else {
+    let Some(store) = store().await else {
         return;
     };
     // Five old positions (t=100..104) and two recent ones (t=1000, 1001).
@@ -179,7 +148,7 @@ async fn prune_once_counts_in_metrics() {
     use aero_ingest::retention::prune_once;
     use std::time::Duration;
 
-    let Some((store, _)) = store().await else {
+    let Some(store) = store().await else {
         return;
     };
     let snap = snapshot(FIRST); // positions from 2024, far older than 30 days
