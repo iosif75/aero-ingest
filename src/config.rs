@@ -4,12 +4,13 @@ use serde::Deserialize;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("could not read credentials file {path}: {source}")]
+    #[error("could not read credentials file {path}: {source}{}", permission_hint(.source))]
     CredentialsRead {
         path: String,
         source: std::io::Error,
@@ -25,6 +26,31 @@ pub enum ConfigError {
     Invalid { name: &'static str, value: String },
     #[error("invalid bounding box: {0}")]
     BadBox(String),
+}
+
+fn permission_hint(e: &std::io::Error) -> &'static str {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        " (in Docker, set AERO_UID/AERO_GID to the file's owner, see README)"
+    } else {
+        ""
+    }
+}
+
+impl ConfigError {
+    fn invalid(name: &'static str, value: impl ToString) -> Self {
+        Self::Invalid {
+            name,
+            value: value.to_string(),
+        }
+    }
+
+    /// Give an `Invalid` error a more descriptive variable name.
+    fn renamed(self, name: &'static str) -> Self {
+        match self {
+            Self::Invalid { value, .. } => Self::Invalid { name, value },
+            other => other,
+        }
+    }
 }
 
 /// OAuth2 client credentials. `Debug` never prints the secret.
@@ -139,17 +165,40 @@ impl fmt::Debug for Config {
                 "database_url",
                 &self.database_url.as_ref().map(|_| "<redacted>"),
             )
+            .field("http_addr", &self.http_addr)
+            .field("retention", &self.retention)
             .finish()
     }
 }
 
 pub const DEFAULT_RETENTION_DAYS: u64 = 30;
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
+const MIN_POLL_INTERVAL_SECS: u64 = 5;
+const MAX_RETENTION_DAYS: u64 = 36_500;
+const SECS_PER_DAY: u64 = 86_400;
 
 pub const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:9090";
 
 pub const DEFAULT_API_BASE: &str = "https://opensky-network.org/api";
 pub const DEFAULT_TOKEN_URL: &str =
     "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token";
+
+/// The default `/health` and `/metrics` address.
+pub fn default_http_addr() -> SocketAddr {
+    DEFAULT_HTTP_ADDR.parse().expect("valid default address")
+}
+
+/// Read `name` and parse it, or use `default` when it is unset.
+fn parse_var<T: FromStr>(
+    get: &impl Fn(&str) -> Option<String>,
+    name: &'static str,
+    default: T,
+) -> Result<T, ConfigError> {
+    match get(name) {
+        None => Ok(default),
+        Some(v) => v.trim().parse().map_err(|_| ConfigError::invalid(name, v)),
+    }
+}
 
 impl Config {
     /// Build from the process environment.
@@ -170,36 +219,28 @@ impl Config {
             },
         };
 
-        let f = |name: &'static str, default: f64| -> Result<f64, ConfigError> {
-            match get(name) {
-                None => Ok(default),
-                Some(v) => v
-                    .trim()
-                    .parse()
-                    .map_err(|_| ConfigError::Invalid { name, value: v }),
-            }
-        };
         let d = BoundingBox::EL_PRAT;
         let bbox = BoundingBox {
-            lamin: f("AERO_LAMIN", d.lamin)?,
-            lomin: f("AERO_LOMIN", d.lomin)?,
-            lamax: f("AERO_LAMAX", d.lamax)?,
-            lomax: f("AERO_LOMAX", d.lomax)?,
+            lamin: parse_var(&get, "AERO_LAMIN", d.lamin)?,
+            lomin: parse_var(&get, "AERO_LOMIN", d.lomin)?,
+            lamax: parse_var(&get, "AERO_LAMAX", d.lamax)?,
+            lomax: parse_var(&get, "AERO_LOMAX", d.lomax)?,
         };
         bbox.validate()?;
 
-        let secs: u64 = match get("AERO_POLL_INTERVAL_SECS") {
-            None => 60,
-            Some(v) => v
-                .trim()
-                .parse()
-                .ok()
-                .filter(|s| *s >= 5)
-                .ok_or(ConfigError::Invalid {
-                    name: "AERO_POLL_INTERVAL_SECS (min 5)",
-                    value: v,
-                })?,
-        };
+        const INTERVAL: &str = "AERO_POLL_INTERVAL_SECS (min 5)";
+        let secs = parse_var(&get, "AERO_POLL_INTERVAL_SECS", DEFAULT_POLL_INTERVAL_SECS)
+            .map_err(|e| e.renamed(INTERVAL))?;
+        if secs < MIN_POLL_INTERVAL_SECS {
+            return Err(ConfigError::invalid(INTERVAL, secs));
+        }
+
+        const RETENTION: &str = "AERO_RETENTION_DAYS (whole days, 0 keeps everything)";
+        let days = parse_var(&get, "AERO_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+            .map_err(|e| e.renamed(RETENTION))?;
+        if days > MAX_RETENTION_DAYS {
+            return Err(ConfigError::invalid(RETENTION, days));
+        }
 
         Ok(Config {
             credentials,
@@ -208,26 +249,8 @@ impl Config {
             api_base: get("OPENSKY_API_BASE").unwrap_or_else(|| DEFAULT_API_BASE.into()),
             token_url: get("OPENSKY_TOKEN_URL").unwrap_or_else(|| DEFAULT_TOKEN_URL.into()),
             database_url: get("DATABASE_URL").filter(|s| !s.trim().is_empty()),
-            http_addr: match get("AERO_HTTP_ADDR") {
-                None => DEFAULT_HTTP_ADDR.parse().expect("valid default"),
-                Some(v) => v.trim().parse().map_err(|_| ConfigError::Invalid {
-                    name: "AERO_HTTP_ADDR",
-                    value: v,
-                })?,
-            },
-            retention: match get("AERO_RETENTION_DAYS") {
-                None => Some(Duration::from_secs(DEFAULT_RETENTION_DAYS * 86_400)),
-                Some(v) => match v.trim().parse::<u64>() {
-                    Ok(0) => None,
-                    Ok(days) if days <= 36_500 => Some(Duration::from_secs(days * 86_400)),
-                    _ => {
-                        return Err(ConfigError::Invalid {
-                            name: "AERO_RETENTION_DAYS (whole days, 0 keeps everything)",
-                            value: v,
-                        })
-                    }
-                },
-            },
+            http_addr: parse_var(&get, "AERO_HTTP_ADDR", default_http_addr())?,
+            retention: (days > 0).then(|| Duration::from_secs(days * SECS_PER_DAY)),
         })
     }
 
@@ -238,7 +261,7 @@ impl Config {
 
     /// Credits used per day at the configured interval.
     pub fn estimated_daily_credits(&self) -> u64 {
-        let polls = 86_400 / self.poll_interval.as_secs().max(1);
+        let polls = SECS_PER_DAY / self.poll_interval.as_secs().max(1);
         polls * u64::from(self.bbox.credits_per_request())
     }
 }

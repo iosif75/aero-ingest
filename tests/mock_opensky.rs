@@ -1,15 +1,13 @@
 //! End-to-end tests against a tiny fake OpenSky server on localhost.
 
-use aero_ingest::auth::TokenManager;
-use aero_ingest::client::{FetchError, OpenSkyClient};
-use aero_ingest::config::{BoundingBox, Credentials};
+mod common;
+
+use aero_ingest::client::FetchError;
+use aero_ingest::config::BoundingBox;
+use common::{fake_server, opensky_client as client, Reply, STATES};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-
-const STATES: &str = r#"{"time":1731400000,"states":[["3423c4","VLG12AB ","Spain",1731399995,1731399999,2.0785,41.2971,1150.6,false,92.5,248.1,-4.2,null,1188.7,"1000",false,0,4]]}"#;
 
 #[derive(Clone, Copy)]
 enum StatesMode {
@@ -19,82 +17,42 @@ enum StatesMode {
     RateLimited,
 }
 
+#[derive(Default)]
 struct Counters {
     token_calls: AtomicUsize,
     state_calls: AtomicUsize,
 }
 
+/// Fake OpenSky that checks each request and answers `/states/all` per `mode`.
 async fn spawn(mode: StatesMode) -> (String, Arc<Counters>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let c = Arc::new(Counters {
-        token_calls: AtomicUsize::new(0),
-        state_calls: AtomicUsize::new(0),
-    });
-    let c2 = c.clone();
-    tokio::spawn(async move {
-        loop {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let c = c2.clone();
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 8192];
-                let n = sock.read(&mut buf).await.unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                let line = req.lines().next().unwrap_or("");
-                let (status, extra, body) = if line.starts_with("POST /token") {
-                    c.token_calls.fetch_add(1, Ordering::SeqCst);
-                    assert!(req.contains("grant_type=client_credentials"));
-                    (
-                        "200 OK",
-                        "",
-                        r#"{"access_token":"tok","expires_in":1800}"#.to_string(),
-                    )
-                } else if line.starts_with("GET /api/states/all?") {
-                    let i = c.state_calls.fetch_add(1, Ordering::SeqCst);
-                    assert!(req
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer tok"));
-                    assert!(line.contains("extended=1") && line.contains("lamin=40.9"));
-                    match mode {
-                        StatesMode::Ok => {
-                            ("200 OK", "X-Rate-Limit-Remaining: 3999\r\n", STATES.into())
-                        }
-                        StatesMode::UnauthorizedOnce if i == 0 => {
-                            ("401 Unauthorized", "", String::new())
-                        }
-                        StatesMode::UnauthorizedOnce => ("200 OK", "", STATES.into()),
-                        StatesMode::AlwaysUnauthorized => ("401 Unauthorized", "", String::new()),
-                        StatesMode::RateLimited => (
-                            "429 Too Many Requests",
-                            "X-Rate-Limit-Retry-After-Seconds: 777\r\n",
-                            String::new(),
-                        ),
-                    }
-                } else {
-                    ("404 Not Found", "", String::new())
-                };
-                let resp = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-            });
+    let c = Arc::new(Counters::default());
+    let counters = c.clone();
+    let base = fake_server(move |req| {
+        let line = req.lines().next().unwrap_or("");
+        if line.starts_with("POST /token") {
+            counters.token_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(req.contains("grant_type=client_credentials"));
+            return Reply::token();
         }
-    });
+        if !line.starts_with("GET /api/states/all?") {
+            return Reply::status("404 Not Found");
+        }
+        let i = counters.state_calls.fetch_add(1, Ordering::SeqCst);
+        assert!(req
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
+        assert!(line.contains("extended=1") && line.contains("lamin=40.9"));
+        match mode {
+            StatesMode::Ok => Reply::ok(STATES).header("X-Rate-Limit-Remaining", "3999"),
+            StatesMode::UnauthorizedOnce if i == 0 => Reply::status("401 Unauthorized"),
+            StatesMode::UnauthorizedOnce => Reply::ok(STATES),
+            StatesMode::AlwaysUnauthorized => Reply::status("401 Unauthorized"),
+            StatesMode::RateLimited => Reply::status("429 Too Many Requests")
+                .header("X-Rate-Limit-Retry-After-Seconds", "777"),
+        }
+    })
+    .await;
     (base, c)
-}
-
-fn client(base: &str) -> OpenSkyClient {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let creds = Credentials {
-        client_id: "id".into(),
-        client_secret: "secret".into(),
-    };
-    let auth = TokenManager::new(http.clone(), format!("{base}/token"), creds);
-    OpenSkyClient::new(http, format!("{base}/api"), auth)
 }
 
 #[tokio::test]

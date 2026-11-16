@@ -34,6 +34,9 @@ curl localhost:9090/health
 
 - Credentials are mounted as a compose secret at `/run/secrets/opensky_credentials`, so they stay out of the image
   and out of `docker inspect`.
+- On Linux the secret keeps the host file's owner and mode. If `credentials.json` is `chmod 600`, set `AERO_UID` and
+  `AERO_GID` in `.env` to its owner (`id -u`, `id -g`) so the container can read it. Docker Desktop on Windows and
+  macOS doesn't need this.
 - The container talks to Postgres at `db:5432`. `AERO_RETENTION_DAYS`, `AERO_POLL_INTERVAL_SECS` and `RUST_LOG`
   are passed through from `.env`.
 - The API is published on `127.0.0.1:9090` only.
@@ -62,7 +65,8 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
   second 401/403 stops the daemon. A 429 pauses for `X-Rate-Limit-Retry-After-Seconds` (300 s if missing).
   Network errors, timeouts, 5xx and bad JSON are logged and retried on the next tick.
 - **Parsing** (`src/model.rs`): hand-written deserialiser for the positional state-vector arrays. Nulls become
-  `None`, callsign padding is trimmed, extra trailing fields are ignored.
+  `None`, callsign padding is trimmed, extra trailing fields are ignored. A malformed row is logged and skipped
+  (`aero_rows_skipped_total`) instead of failing the whole poll.
 - **Storage** (`src/storage.rs`, `migrations/`): table `state_vectors` with primary key `(icao24, time_position)`.
   Each snapshot is one `INSERT … SELECT FROM UNNEST(…) ON CONFLICT DO NOTHING`, so the repeated reports OpenSky
   returns until an aircraft sends a new position are dropped for free. Rows without a position are not stored.
@@ -71,9 +75,10 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
   as long as the total wait stays under half the poll interval. If every retry fails, that tick is skipped.
 - **Health** (`GET /health`, `src/http.rs`): JSON with `status` and timings. `ok`, `starting` (no poll yet, within
   the grace period) and `rate_limited` (waiting out a 429) return 200. `stale` returns 503: no successful poll for
-  3× the interval (at least 180 s).
+  3× the interval (at least 180 s). `db_failing` also returns 503: polling
+  works but the last 3 snapshot writes failed. It clears on the next successful write.
 - **Metrics** (`GET /metrics`, `src/metrics.rs`): Prometheus text format. Counters for polls ok/failed/rate-limited,
-  retries, rows inserted/duplicate/pruned, DB errors and prune errors; gauges for aircraft and stale positions on the last poll, credits
+  retries, rows inserted/duplicate/pruned/skipped, DB errors and prune errors; gauges for aircraft and stale positions on the last poll, consecutive DB write failures, credits
   remaining, last success time and start time.
 - **Query API** (`src/http.rs`, `src/query.rs`): see below.
 - **Retention** (`src/retention.rs`): at startup and then hourly, positions older than `AERO_RETENTION_DAYS` are
@@ -89,7 +94,7 @@ Exit codes: `0` clean shutdown, `1` fatal auth error, `2` bad configuration, `3`
 
 ## Query API
 
-Times are Unix seconds and both bounds are inclusive. `to` defaults to now, `from` to `to` minus 2 hours. One
+Times are Unix seconds between 0 and 253402300799 (year 9999), and both bounds are inclusive. `to` defaults to now, `from` to `to` minus 2 hours. One
 request may cover at most 24 hours. `limit` defaults to 5,000 (max 50,000). If more rows match, the response
 has `"truncated": true`, so narrow the window to get the rest.
 

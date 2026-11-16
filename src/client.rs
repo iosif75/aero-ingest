@@ -1,8 +1,9 @@
 //! OpenSky REST client for `/states/all`.
 
-use crate::auth::{truncate, AuthError, TokenManager};
+use crate::auth::{AuthError, TokenManager};
 use crate::config::BoundingBox;
 use crate::model::StatesResponse;
+use crate::util::truncate;
 use reqwest::{header::HeaderMap, StatusCode};
 use std::time::Duration;
 use thiserror::Error;
@@ -45,11 +46,14 @@ pub struct OpenSkyClient {
 
 /// Used when a 429 arrives without a usable retry header.
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(300);
+/// Credits reset daily, so never pause longer than a day.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 3600);
 
+/// How long to pause after a 429, from `X-Rate-Limit-Retry-After-Seconds`.
 pub fn retry_after(headers: &HeaderMap) -> Duration {
     header_i64(headers, "x-rate-limit-retry-after-seconds")
         .filter(|s| *s >= 0)
-        .map(|s| Duration::from_secs(s as u64))
+        .map(|s| Duration::from_secs(s as u64).min(MAX_RETRY_AFTER))
         .unwrap_or(DEFAULT_RETRY_AFTER)
 }
 

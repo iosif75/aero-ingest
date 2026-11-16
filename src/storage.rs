@@ -1,6 +1,7 @@
 //! Postgres storage for state vectors.
 
-use crate::model::StateVector;
+use crate::config::BoundingBox;
+use crate::model::{PositionSource, StateVector};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::time::Duration;
 
@@ -123,7 +124,7 @@ struct Columns {
     on_ground: Vec<bool>,
     squawk: Vec<Option<String>>,
     spi: Vec<bool>,
-    position_source: Vec<i16>,
+    position_source: Vec<Option<i16>>,
     category: Vec<Option<i16>>,
 }
 
@@ -170,7 +171,8 @@ impl Columns {
         self.on_ground.push(s.on_ground);
         self.squawk.push(s.squawk.clone());
         self.spi.push(s.spi);
-        self.position_source.push(s.position_source.code());
+        self.position_source
+            .push(s.position_source.map(PositionSource::code));
         self.category.push(s.category.map(i16::from));
     }
 }
@@ -226,7 +228,7 @@ impl Store {
     /// Fetches up to `limit + 1` rows so the caller can tell if it was cut off.
     pub async fn in_box(
         &self,
-        bbox: &crate::config::BoundingBox,
+        bbox: &BoundingBox,
         from: i64,
         to: i64,
         limit: i64,

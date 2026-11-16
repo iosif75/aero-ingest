@@ -23,6 +23,10 @@ services:
     build: .
     image: aero-ingest:latest
     restart: unless-stopped
+    # Compose mounts file secrets with the host file's owner and mode, so on
+    # Linux a chmod 600 credentials.json is only readable by its owner. Set
+    # AERO_UID/AERO_GID in .env to that owner (`id -u`, `id -g`) in that case.
+    user: "${AERO_UID:-10001}:${AERO_GID:-10001}"
     depends_on:
       db:
         condition: service_healthy

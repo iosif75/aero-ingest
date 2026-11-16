@@ -19,7 +19,9 @@ pub struct Metrics {
     pub rows_inserted: AtomicU64,
     pub rows_duplicate: AtomicU64,
     pub db_errors: AtomicU64,
+    db_failures_in_a_row: AtomicU64,
     pub rows_pruned: AtomicU64,
+    pub rows_skipped: AtomicU64,
     pub prune_errors: AtomicU64,
     pub aircraft_last_poll: AtomicU64,
     pub stale_last_poll: AtomicU64,
@@ -52,7 +54,9 @@ impl Metrics {
             rows_inserted: AtomicU64::new(0),
             rows_duplicate: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
+            db_failures_in_a_row: AtomicU64::new(0),
             rows_pruned: AtomicU64::new(0),
+            rows_skipped: AtomicU64::new(0),
             prune_errors: AtomicU64::new(0),
             aircraft_last_poll: AtomicU64::new(0),
             stale_last_poll: AtomicU64::new(0),
@@ -80,6 +84,22 @@ impl Metrics {
     pub fn record_rate_limited(&self, until: i64) {
         self.polls_rate_limited.fetch_add(1, Relaxed);
         self.rate_limited_until_unix.store(until, Relaxed);
+    }
+
+    /// A snapshot was written to the database.
+    pub fn record_db_ok(&self) {
+        self.db_failures_in_a_row.store(0, Relaxed);
+    }
+
+    /// A snapshot write failed.
+    pub fn record_db_error(&self) {
+        self.db_errors.fetch_add(1, Relaxed);
+        self.db_failures_in_a_row.fetch_add(1, Relaxed);
+    }
+
+    /// Snapshot writes that failed since the last one that worked.
+    pub fn db_failures_in_a_row(&self) -> u64 {
+        self.db_failures_in_a_row.load(Relaxed)
     }
 
     pub fn last_success(&self) -> Option<i64> {
@@ -145,6 +165,11 @@ impl Metrics {
             self.rows_pruned.load(Relaxed),
         );
         counter(
+            "aero_rows_skipped_total",
+            "Malformed state vectors dropped while parsing.",
+            self.rows_skipped.load(Relaxed),
+        );
+        counter(
             "aero_prune_errors_total",
             "Failed retention passes.",
             self.prune_errors.load(Relaxed),
@@ -164,6 +189,11 @@ impl Metrics {
             "aero_stale_positions_last_poll",
             "Positions older than 60 s on the last successful poll.",
             Some(self.stale_last_poll.load(Relaxed) as i64),
+        );
+        gauge(
+            "aero_db_consecutive_failures",
+            "Snapshot writes that failed since the last successful one.",
+            Some(self.db_failures_in_a_row() as i64),
         );
         gauge(
             "aero_credits_remaining",

@@ -3,42 +3,17 @@
 //! The database tests need `TEST_DATABASE_URL` (see tests/storage_pg.rs) and
 //! are skipped without it. Validation and the no-storage case always run.
 
+mod common;
+
 use aero_ingest::http::{router, AppState};
 use aero_ingest::metrics::Metrics;
-use aero_ingest::model::StatesResponse;
-use aero_ingest::storage::{Store, MIGRATOR};
+use aero_ingest::storage::Store;
+use common::{snapshot, test_store};
 use serde_json::Value;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::Executor;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-
-async fn test_store() -> Option<Store> {
-    let url = std::env::var("TEST_DATABASE_URL").ok()?;
-    let schema = format!("aero_query_{}", std::process::id());
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .unwrap();
-    admin
-        .execute(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}").as_str())
-        .await
-        .unwrap();
-    let opts = PgConnectOptions::from_str(&url)
-        .unwrap()
-        .options([("search_path", schema.as_str())]);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(opts)
-        .await
-        .unwrap();
-    MIGRATOR.run(&pool).await.unwrap();
-    Some(Store::from_pool(pool))
-}
 
 async fn serve(store: Option<Store>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -76,7 +51,7 @@ async fn track_and_box_queries() {
         return;
     };
     for s in SNAPSHOTS {
-        let r: StatesResponse = serde_json::from_str(s).unwrap();
+        let r = snapshot(s);
         store.insert_snapshot(r.time, &r.states).await.unwrap();
     }
     let addr = serve(Some(store)).await;
