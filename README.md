@@ -20,6 +20,27 @@ retries, `/health`, Prometheus metrics, a read-only query API, and storage reten
 
 `RUST_LOG=aero_ingest=debug` logs every aircraft on each poll instead of just the counts.
 
+## Running in Docker
+
+The daemon has its own image and an opt-in compose service, so plain `docker compose up -d` still starts only
+Postgres.
+
+```
+# .env must set OPENSKY_CREDENTIALS_FILE to the host path of credentials.json
+docker compose --profile daemon up -d --build
+docker compose logs -f aero-ingest
+curl localhost:9090/health
+```
+
+- Credentials are mounted as a compose secret at `/run/secrets/opensky_credentials`, so they stay out of the image
+  and out of `docker inspect`.
+- The container talks to Postgres at `db:5432`. `AERO_RETENTION_DAYS`, `AERO_POLL_INTERVAL_SECS` and `RUST_LOG`
+  are passed through from `.env`.
+- The API is published on `127.0.0.1:9090` only.
+- The image runs as a non-root user and has a built-in health check (`aero-ingest healthcheck` calls `/health`,
+  since the image has no curl). `docker ps` shows it as healthy or unhealthy.
+- Multi-stage build: about 130 MB, with only the binary and TLS roots on top of `debian:bookworm-slim`.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -59,7 +80,9 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
   deleted in batches of 10,000 rows so no single statement holds locks for long. A failed pass is logged and
   retried next hour. Progress shows up as `aero_rows_pruned_total` and `aero_prune_errors_total` in `/metrics`.
 - **Poll loop** (`src/poller.rs`): logs aircraft count, how many have a position, how many positions are stale
-  (> 60 s old), how many are on the ground, and credits remaining. Ctrl+C exits cleanly.
+  (> 60 s old), how many are on the ground, and credits remaining. Ctrl+C or SIGTERM (`docker stop`) exits cleanly.
+
+`aero-ingest healthcheck` exits 0 if `/health` on `AERO_HTTP_ADDR` answers 200, otherwise 1.
 
 Exit codes: `0` clean shutdown, `1` fatal auth error, `2` bad configuration, `3` can't reach Postgres at startup,
 `4` can't bind the HTTP address.

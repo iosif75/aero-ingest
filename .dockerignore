@@ -1,0 +1,10 @@
+target
+.git
+.github
+.env
+.env.*
+!.env.example
+credentials.json
+*.credentials.json
+tests
+README.md

@@ -16,5 +16,31 @@ services:
       timeout: 3s
       retries: 10
 
+  # The daemon itself. Opt-in so `docker compose up -d` still starts only
+  # Postgres for local development: run `docker compose --profile daemon up -d`.
+  aero-ingest:
+    profiles: ["daemon"]
+    build: .
+    image: aero-ingest:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://aero:aero@db:5432/aero
+      OPENSKY_CREDENTIALS_FILE: /run/secrets/opensky_credentials
+      AERO_RETENTION_DAYS: ${AERO_RETENTION_DAYS:-30}
+      AERO_POLL_INTERVAL_SECS: ${AERO_POLL_INTERVAL_SECS:-60}
+      RUST_LOG: ${RUST_LOG:-aero_ingest=info}
+    secrets:
+      - opensky_credentials
+    ports:
+      - "127.0.0.1:9090:9090"
+
+secrets:
+  opensky_credentials:
+    # Host path to credentials.json, read from OPENSKY_CREDENTIALS_FILE in .env.
+    file: ${OPENSKY_CREDENTIALS_FILE:-./credentials.json}
+
 volumes:
   aero-pg:
