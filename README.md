@@ -4,7 +4,7 @@ A small Rust daemon that polls the [OpenSky Network](https://opensky-network.org
 around Barcelona–El Prat and logs what it sees. It is the ingestion layer for Aeroscan.
 
 Status: steps 1–5 of the plan: OAuth2 token manager, poll loop, state-vector parsing, Postgres storage,
-retries, `/health`, Prometheus metrics, and a read-only query API.
+retries, `/health`, Prometheus metrics, a read-only query API, and storage retention.
 
 ## Setup
 
@@ -28,6 +28,7 @@ retries, `/health`, Prometheus metrics, and a read-only query API.
 | `AERO_POLL_INTERVAL_SECS` | 60 | Poll interval, minimum 5 |
 | `DATABASE_URL` | – | Postgres URL; unset means log-only |
 | `AERO_HTTP_ADDR` | 127.0.0.1:9090 | Address for `/health` and `/metrics` |
+| `AERO_RETENTION_DAYS` | 30 | Delete positions older than this many days; `0` keeps everything |
 
 At startup it logs the estimated daily credit use (1,440 with the defaults; a registered account has 4,000/day).
 
@@ -49,9 +50,12 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
   the grace period) and `rate_limited` (waiting out a 429) return 200. `stale` returns 503: no successful poll for
   3× the interval (at least 180 s).
 - **Metrics** (`GET /metrics`, `src/metrics.rs`): Prometheus text format. Counters for polls ok/failed/rate-limited,
-  retries, rows inserted/duplicate and DB errors; gauges for aircraft and stale positions on the last poll, credits
+  retries, rows inserted/duplicate/pruned, DB errors and prune errors; gauges for aircraft and stale positions on the last poll, credits
   remaining, last success time and start time.
 - **Query API** (`src/http.rs`, `src/query.rs`): see below.
+- **Retention** (`src/retention.rs`): at startup and then hourly, positions older than `AERO_RETENTION_DAYS` are
+  deleted in batches of 10,000 rows so no single statement holds locks for long. A failed pass is logged and
+  retried next hour. Progress shows up as `aero_rows_pruned_total` and `aero_prune_errors_total` in `/metrics`.
 - **Poll loop** (`src/poller.rs`): logs aircraft count, how many have a position, how many positions are stale
   (> 60 s old), how many are on the ground, and credits remaining. Ctrl+C exits cleanly.
 

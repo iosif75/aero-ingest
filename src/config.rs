@@ -123,6 +123,8 @@ pub struct Config {
     pub database_url: Option<String>,
     /// Where `/health` and `/metrics` listen.
     pub http_addr: SocketAddr,
+    /// Delete positions older than this. `None` keeps everything.
+    pub retention: Option<Duration>,
 }
 
 impl fmt::Debug for Config {
@@ -140,6 +142,8 @@ impl fmt::Debug for Config {
             .finish()
     }
 }
+
+pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 
 pub const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:9090";
 
@@ -210,6 +214,19 @@ impl Config {
                     name: "AERO_HTTP_ADDR",
                     value: v,
                 })?,
+            },
+            retention: match get("AERO_RETENTION_DAYS") {
+                None => Some(Duration::from_secs(DEFAULT_RETENTION_DAYS * 86_400)),
+                Some(v) => match v.trim().parse::<u64>() {
+                    Ok(0) => None,
+                    Ok(days) if days <= 36_500 => Some(Duration::from_secs(days * 86_400)),
+                    _ => {
+                        return Err(ConfigError::Invalid {
+                            name: "AERO_RETENTION_DAYS (whole days, 0 keeps everything)",
+                            value: v,
+                        })
+                    }
+                },
             },
         })
     }
@@ -312,6 +329,27 @@ mod tests {
         );
         let bad = [base[0], base[1], ("AERO_HTTP_ADDR", "nope")];
         assert!(Config::from_lookup(lookup(&bad)).is_err());
+    }
+
+    #[test]
+    fn retention_days() {
+        let base = [("OPENSKY_CLIENT_ID", "id"), ("OPENSKY_CLIENT_SECRET", "s")];
+        let with = |v: &'static str| {
+            let mut p = base.to_vec();
+            p.push(("AERO_RETENTION_DAYS", v));
+            Config::from_lookup(lookup(&p))
+        };
+        assert_eq!(
+            Config::from_lookup(lookup(&base)).unwrap().retention,
+            Some(Duration::from_secs(30 * 86_400))
+        );
+        assert_eq!(
+            with("7").unwrap().retention,
+            Some(Duration::from_secs(7 * 86_400))
+        );
+        assert_eq!(with("0").unwrap().retention, None);
+        assert!(with("-1").is_err());
+        assert!(with("1.5").is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ use aero_ingest::config::Config;
 use aero_ingest::http::{self as api, AppState};
 use aero_ingest::metrics::Metrics;
 use aero_ingest::poller::{self, Exit};
+use aero_ingest::retention;
 use aero_ingest::storage::Store;
 use std::future::IntoFuture;
 use std::process::ExitCode;
@@ -106,6 +107,25 @@ async fn main() -> ExitCode {
             .into_future(),
     );
 
+    let pruner = match (store.clone(), config.retention) {
+        (Some(store), Some(keep)) => {
+            tracing::info!(
+                retention_days = keep.as_secs() / 86_400,
+                "retention enabled"
+            );
+            let metrics = metrics.clone();
+            let stop = stopped(stop_rx.clone());
+            Some(tokio::spawn(async move {
+                retention::run(store, &metrics, keep, retention::PRUNE_EVERY, stop).await
+            }))
+        }
+        (Some(_), None) => {
+            tracing::info!("retention disabled, keeping all positions");
+            None
+        }
+        (None, _) => None,
+    };
+
     let exit = poller::run(
         &client,
         store.as_ref(),
@@ -116,6 +136,9 @@ async fn main() -> ExitCode {
     )
     .await;
     server.abort();
+    if let Some(p) = pruner {
+        p.abort();
+    }
 
     match exit {
         Exit::Shutdown => ExitCode::SUCCESS,

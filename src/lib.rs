@@ -8,4 +8,5 @@ pub mod metrics;
 pub mod model;
 pub mod poller;
 pub mod query;
+pub mod retention;
 pub mod storage;

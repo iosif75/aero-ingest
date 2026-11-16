@@ -19,6 +19,8 @@ pub struct Metrics {
     pub rows_inserted: AtomicU64,
     pub rows_duplicate: AtomicU64,
     pub db_errors: AtomicU64,
+    pub rows_pruned: AtomicU64,
+    pub prune_errors: AtomicU64,
     pub aircraft_last_poll: AtomicU64,
     pub stale_last_poll: AtomicU64,
     credits_remaining: AtomicI64,
@@ -50,6 +52,8 @@ impl Metrics {
             rows_inserted: AtomicU64::new(0),
             rows_duplicate: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
+            rows_pruned: AtomicU64::new(0),
+            prune_errors: AtomicU64::new(0),
             aircraft_last_poll: AtomicU64::new(0),
             stale_last_poll: AtomicU64::new(0),
             credits_remaining: AtomicI64::new(UNSET),
@@ -133,6 +137,17 @@ impl Metrics {
             "aero_db_errors_total",
             "Failed snapshot writes.",
             self.db_errors.load(Relaxed),
+        );
+
+        counter(
+            "aero_rows_pruned_total",
+            "Old state vectors deleted by retention.",
+            self.rows_pruned.load(Relaxed),
+        );
+        counter(
+            "aero_prune_errors_total",
+            "Failed retention passes.",
+            self.prune_errors.load(Relaxed),
         );
 
         let mut gauge = |name: &str, help: &str, v: Option<i64>| {
