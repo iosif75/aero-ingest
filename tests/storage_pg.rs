@@ -81,7 +81,7 @@ async fn inserts_positions_and_drops_duplicates() {
 
     let r = &rows[2];
     assert_eq!(r.get::<String, _>("icao24"), "4ca7b5");
-    assert_eq!(r.get::<i16, _>("position_source"), 2);
+    assert_eq!(r.get::<Option<i16>, _>("position_source"), Some(2));
     assert_eq!(r.get::<Option<f64>, _>("geo_altitude"), None);
 }
 
@@ -181,4 +181,23 @@ async fn duplicate_rows_within_one_snapshot_insert_once() {
             inserted: 1
         }
     );
+}
+
+#[tokio::test]
+async fn missing_position_source_is_stored_as_null() {
+    let Some(store) = store().await else {
+        return;
+    };
+    let snap = snapshot(
+        r#"{"time":1000,"states":[["3423c4","X","ES",1000,1000,2.0,41.0,null,false,null,null,null,null,null,null,false,null]]}"#,
+    );
+    store
+        .insert_snapshot(snap.time, &snap.states)
+        .await
+        .unwrap();
+    let ps: Option<i16> = sqlx::query_scalar("SELECT position_source FROM state_vectors")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(ps, None);
 }

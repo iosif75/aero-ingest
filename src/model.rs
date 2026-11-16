@@ -113,7 +113,8 @@ pub struct StateVector {
     pub geo_altitude: Option<f64>,
     pub squawk: Option<String>,
     pub spi: bool,
-    pub position_source: PositionSource,
+    /// `None` when OpenSky omits it.
+    pub position_source: Option<PositionSource>,
     /// Aircraft category (only with `extended=1`).
     pub category: Option<u8>,
 }
@@ -210,7 +211,7 @@ impl<'de> Visitor<'de> for StateVectorVisitor {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             spi: spi.unwrap_or(false),
-            position_source: PositionSource::from(position_source.unwrap_or(0)),
+            position_source: position_source.map(PositionSource::from),
             category,
         })
     }
@@ -237,7 +238,7 @@ mod tests {
         assert_eq!(s.callsign.as_deref(), Some("VLG12AB"));
         assert_eq!(s.latitude, Some(41.2971));
         assert_eq!(s.category, Some(4));
-        assert_eq!(s.position_source, PositionSource::AdsB);
+        assert_eq!(s.position_source, Some(PositionSource::AdsB));
         assert!(s.has_position());
         assert_eq!(s.position_age(1731400000), Some(5));
     }
@@ -265,7 +266,7 @@ mod tests {
         let json = r#"["abc123","X",null,1,2,1.0,2.0,null,false,null,null,null,[1,2],null,null,null,2,null,"future",42]"#;
         let s: StateVector = serde_json::from_str(json).unwrap();
         assert_eq!(s.sensors, Some(vec![1, 2]));
-        assert_eq!(s.position_source, PositionSource::Mlat);
+        assert_eq!(s.position_source, Some(PositionSource::Mlat));
         assert_eq!(s.origin_country, "");
     }
 
@@ -273,5 +274,12 @@ mod tests {
     fn rejects_short_row() {
         let err = serde_json::from_str::<StateVector>(r#"["abc123","X","Spain",1,2]"#).unwrap_err();
         assert!(err.to_string().contains("too short"), "{err}");
+    }
+
+    #[test]
+    fn missing_position_source_is_none_not_adsb() {
+        let json = r#"["abc123","X","ES",1,2,1.0,2.0,null,false,null,null,null,null,null,null,false,null]"#;
+        let s: StateVector = serde_json::from_str(json).unwrap();
+        assert_eq!(s.position_source, None);
     }
 }
