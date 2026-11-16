@@ -132,3 +132,64 @@ async fn migrations_are_idempotent() {
     };
     MIGRATOR.run(store.pool()).await.unwrap();
 }
+
+#[tokio::test]
+async fn prune_deletes_only_old_rows_in_batches() {
+    let Some((store, _)) = store().await else {
+        return;
+    };
+    // Five old positions (t=100..104) and two recent ones (t=1000, 1001).
+    let row = |icao: &str, t: i64| {
+        format!(
+            r#"["{icao}",null,"ES",{t},{t},2.0,41.0,null,false,null,null,null,null,null,null,false,0]"#
+        )
+    };
+    let mut rows: Vec<String> = (0..5).map(|i| row("aaaaaa", 100 + i)).collect();
+    rows.push(row("bbbbbb", 1000));
+    rows.push(row("bbbbbb", 1001));
+    let snap = snapshot(&format!(r#"{{"time":1001,"states":[{}]}}"#, rows.join(",")));
+    store
+        .insert_snapshot(snap.time, &snap.states)
+        .await
+        .unwrap();
+
+    // Batch of 2 forces three delete statements for the five old rows.
+    let deleted = store.prune_older_than(1000, 2).await.unwrap();
+    assert_eq!(deleted, 5);
+
+    let left: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT icao24, extract(epoch FROM time_position)::bigint FROM state_vectors ORDER BY 2",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        left,
+        vec![("bbbbbb".to_string(), 1000), ("bbbbbb".to_string(), 1001)],
+        "cutoff is exclusive"
+    );
+
+    // Nothing left to prune.
+    assert_eq!(store.prune_older_than(1000, 2).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn prune_once_counts_in_metrics() {
+    use aero_ingest::metrics::Metrics;
+    use aero_ingest::retention::prune_once;
+    use std::time::Duration;
+
+    let Some((store, _)) = store().await else {
+        return;
+    };
+    let snap = snapshot(FIRST); // positions from 2024, far older than 30 days
+    store
+        .insert_snapshot(snap.time, &snap.states)
+        .await
+        .unwrap();
+
+    let m = Metrics::default();
+    let n = prune_once(&store, &m, Duration::from_secs(30 * 86_400)).await;
+    assert_eq!(n, Some(2));
+    assert!(m.render().contains("aero_rows_pruned_total 2\n"));
+}

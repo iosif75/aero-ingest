@@ -248,3 +248,28 @@ impl Store {
         .await
     }
 }
+
+impl Store {
+    /// Delete positions with `time_position` before `cutoff` (unix seconds),
+    /// `batch` rows per statement so no single delete holds locks for long.
+    /// Returns the number of rows deleted.
+    pub async fn prune_older_than(&self, cutoff: i64, batch: i64) -> Result<u64, sqlx::Error> {
+        let mut total = 0;
+        loop {
+            let n = sqlx::query(
+                "DELETE FROM state_vectors WHERE ctid IN ( \
+                     SELECT ctid FROM state_vectors \
+                     WHERE time_position < to_timestamp($1) LIMIT $2)",
+            )
+            .bind(cutoff as f64)
+            .bind(batch)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            total += n;
+            if (n as i64) < batch {
+                return Ok(total);
+            }
+        }
+    }
+}
