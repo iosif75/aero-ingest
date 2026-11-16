@@ -128,7 +128,13 @@ pub enum Status {
     RateLimited,
     /// No successful poll for longer than `max_silence`.
     Stale,
+    /// Polling works but the last few snapshots could not be stored.
+    DbFailing,
 }
+
+/// This many failed snapshot writes in a row make the daemon unhealthy.
+/// One blip (a Postgres restart) stays healthy; three minutes of data loss does not.
+pub const DB_FAILURE_THRESHOLD: u64 = 3;
 
 #[derive(Debug, Serialize)]
 pub struct HealthReport {
@@ -137,6 +143,7 @@ pub struct HealthReport {
     pub seconds_since_success: Option<i64>,
     pub rate_limited_until_unix: Option<i64>,
     pub credits_remaining: Option<i64>,
+    pub db_consecutive_failures: u64,
     pub uptime_seconds: i64,
 }
 
@@ -144,7 +151,7 @@ impl HealthReport {
     pub fn http_status(&self) -> StatusCode {
         match self.status {
             Status::Ok | Status::Starting | Status::RateLimited => StatusCode::OK,
-            Status::Stale => StatusCode::SERVICE_UNAVAILABLE,
+            Status::Stale | Status::DbFailing => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
@@ -156,8 +163,11 @@ pub fn assess(m: &Metrics, max_silence: Duration, now: i64) -> HealthReport {
     let since = last.map(|t| now - t);
     let limited = m.rate_limited_until().filter(|&until| until > now);
     let uptime = now - m.started_at();
+    let db_failures = m.db_failures_in_a_row();
 
     let status = match (since, limited) {
+        // Fetching fine but losing the data is not healthy.
+        _ if db_failures >= DB_FAILURE_THRESHOLD => Status::DbFailing,
         (Some(s), _) if s <= max => Status::Ok,
         (_, Some(_)) => Status::RateLimited,
         (None, None) if uptime <= max => Status::Starting,
@@ -170,6 +180,7 @@ pub fn assess(m: &Metrics, max_silence: Duration, now: i64) -> HealthReport {
         seconds_since_success: since,
         rate_limited_until_unix: limited,
         credits_remaining: m.credits_remaining(),
+        db_consecutive_failures: db_failures,
         uptime_seconds: uptime,
     }
 }
@@ -233,6 +244,26 @@ mod tests {
         assert_eq!(r.status, Status::Ok);
         assert_eq!(r.seconds_since_success, Some(150));
         assert_eq!(r.http_status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn repeated_db_failures_are_unhealthy_until_a_write_works() {
+        let m = Metrics::new(1000);
+        m.record_success(1050, 10, 0, None);
+        m.record_db_error();
+        m.record_db_error();
+        assert_eq!(
+            assess(&m, MAX, 1060).status,
+            Status::Ok,
+            "two blips are tolerated"
+        );
+        m.record_db_error();
+        let r = assess(&m, MAX, 1060);
+        assert_eq!(r.status, Status::DbFailing);
+        assert_eq!(r.db_consecutive_failures, 3);
+        assert_eq!(r.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        m.record_db_ok();
+        assert_eq!(assess(&m, MAX, 1060).status, Status::Ok);
     }
 
     #[test]

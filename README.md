@@ -75,9 +75,10 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
   as long as the total wait stays under half the poll interval. If every retry fails, that tick is skipped.
 - **Health** (`GET /health`, `src/http.rs`): JSON with `status` and timings. `ok`, `starting` (no poll yet, within
   the grace period) and `rate_limited` (waiting out a 429) return 200. `stale` returns 503: no successful poll for
-  3× the interval (at least 180 s).
+  3× the interval (at least 180 s). `db_failing` also returns 503: polling
+  works but the last 3 snapshot writes failed. It clears on the next successful write.
 - **Metrics** (`GET /metrics`, `src/metrics.rs`): Prometheus text format. Counters for polls ok/failed/rate-limited,
-  retries, rows inserted/duplicate/pruned/skipped, DB errors and prune errors; gauges for aircraft and stale positions on the last poll, credits
+  retries, rows inserted/duplicate/pruned/skipped, DB errors and prune errors; gauges for aircraft and stale positions on the last poll, consecutive DB write failures, credits
   remaining, last success time and start time.
 - **Query API** (`src/http.rs`, `src/query.rs`): see below.
 - **Retention** (`src/retention.rs`): at startup and then hourly, positions older than `AERO_RETENTION_DAYS` are

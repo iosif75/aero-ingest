@@ -144,6 +144,7 @@ async fn persist(store: &Store, metrics: &Metrics, snap: &Snapshot) {
     match store.insert_snapshot(r.time, &r.states).await {
         Ok(w) => {
             let dup = w.candidates as u64 - w.inserted;
+            metrics.record_db_ok();
             metrics.rows_inserted.fetch_add(w.inserted, Relaxed);
             metrics.rows_duplicate.fetch_add(dup, Relaxed);
             tracing::info!(
@@ -154,7 +155,7 @@ async fn persist(store: &Store, metrics: &Metrics, snap: &Snapshot) {
             );
         }
         Err(e) => {
-            metrics.db_errors.fetch_add(1, Relaxed);
+            metrics.record_db_error();
             tracing::error!(error = %e, "failed to store snapshot");
         }
     }
