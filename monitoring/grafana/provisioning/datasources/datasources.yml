@@ -1,0 +1,25 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+
+  - name: Postgres
+    uid: aero-postgres
+    type: grafana-postgresql-datasource
+    url: db:5432
+    user: aero
+    editable: false
+    jsonData:
+      database: aero
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: aero

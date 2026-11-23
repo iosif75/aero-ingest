@@ -41,6 +41,50 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
 
+  # Prometheus and Grafana for the daemon's /metrics. Opt-in as well:
+  # `docker compose --profile daemon --profile monitoring up -d`.
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - aero-prometheus:/prometheus
+    ports:
+      # 9090 on the host is already the daemon's.
+      - "127.0.0.1:9091:9090"
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - db
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Read-only access without logging in. The port is bound to localhost.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/aero-ingest.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - aero-grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+
 secrets:
   opensky_credentials:
     # Host path to credentials.json, read from OPENSKY_CREDENTIALS_FILE in .env.
@@ -48,3 +92,5 @@ secrets:
 
 volumes:
   aero-pg:
+  aero-prometheus:
+  aero-grafana:
