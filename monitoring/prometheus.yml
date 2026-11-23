@@ -1,0 +1,12 @@
+# Scrapes the daemon's /metrics. Used by the `monitoring` compose profile.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: aero-ingest
+    static_configs:
+      # The compose service. If you run the daemon with `cargo run` on the
+      # host instead, use host.docker.internal:9090 here and start the daemon
+      # with AERO_HTTP_ADDR=0.0.0.0:9090 so the container can reach it.
+      - targets: ["aero-ingest:9090"]

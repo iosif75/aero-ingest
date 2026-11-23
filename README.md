@@ -6,7 +6,7 @@ A small Rust daemon that polls the [OpenSky Network](https://opensky-network.org
 around Barcelona–El Prat and logs what it sees. It is the ingestion layer for Aeroscan.
 
 Status: steps 1–5 of the plan: OAuth2 token manager, poll loop, state-vector parsing, Postgres storage,
-retries, `/health`, Prometheus metrics, a read-only query API, and storage retention.
+retries, `/health`, Prometheus metrics, a read-only query API, storage retention, and a Grafana dashboard.
 
 ## Setup
 
@@ -43,6 +43,36 @@ curl localhost:9090/health
 - The image runs as a non-root user and has a built-in health check (`aero-ingest healthcheck` calls `/health`,
   since the image has no curl). `docker ps` shows it as healthy or unhealthy.
 - Multi-stage build: about 130 MB, with only the binary and TLS roots on top of `debian:bookworm-slim`.
+
+## Dashboard
+
+Prometheus and Grafana come as another opt-in compose profile, with the data sources and an `aero-ingest`
+dashboard provisioned from `monitoring/`.
+
+```
+docker compose --profile daemon --profile monitoring up -d --build
+```
+
+Then open <http://localhost:3000>. The dashboard is the home page and can be viewed without logging in; log in as
+`admin` (password `admin`, or `GRAFANA_ADMIN_PASSWORD` from `.env`) to edit. Prometheus is on
+<http://localhost:9091>, since 9090 is the daemon's. Both are bound to localhost only.
+
+- **Status**: whether Prometheus can scrape the daemon, time since the last good poll (red at 180 s, when `/health`
+  goes `stale`), DB write failures in a row (red at 3, when it goes `db_failing`), credits remaining, aircraft in
+  the box and uptime.
+- **Polling**: poll outcomes (ok, failed, 429, retries), aircraft and stale positions per poll, credits remaining
+  and credits used per hour.
+- **Storage**: rows inserted, duplicate and skipped as malformed, DB and retention errors, rows pruned, and the
+  table's size on disk and estimated row count.
+- **Traffic**, straight from `state_vectors`: a map of each aircraft's latest position in the last 10 minutes,
+  coloured by altitude and pointing along its track, the most reported aircraft in the time range, and stored
+  positions and distinct aircraft over time.
+
+Prometheus keeps 30 days of metrics (`PROMETHEUS_RETENTION` in `.env` to change it). To scrape a daemon started
+with `cargo run` instead of the compose service, change the target in `monitoring/prometheus.yml` to
+`host.docker.internal:9090` and run the daemon with `AERO_HTTP_ADDR=0.0.0.0:9090`. The dashboard is provisioned
+read-only, so to change it, edit a copy in Grafana, export the JSON and replace
+`monitoring/grafana/dashboards/aero-ingest.json`. The map's base layer is loaded from the internet by your browser.
 
 ## Configuration
 
