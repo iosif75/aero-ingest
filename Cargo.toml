@@ -15,7 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "2"
 dotenvy = "0.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread"] }

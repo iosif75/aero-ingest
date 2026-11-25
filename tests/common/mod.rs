@@ -130,7 +130,9 @@ pub async fn test_store() -> Option<Store> {
         .await
         .unwrap();
     admin
-        .execute(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}").as_str())
+        .execute(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+        )))
         .await
         .unwrap();
     let opts = PgConnectOptions::from_str(&url)
