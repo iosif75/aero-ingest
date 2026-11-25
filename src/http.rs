@@ -1,11 +1,12 @@
-//! HTTP API: `/health`, `/metrics`, and the read-only query endpoints.
+//! HTTP API: `/health`, `/metrics`, the read-only query endpoints and the
+//! `/polls` feed that Aero-Scan reads.
 //!
 //! There is no authentication, so keep it bound to localhost (the default)
 //! or behind a reverse proxy.
 
 use crate::metrics::{now_unix, Metrics};
-use crate::query::{parse_icao24, BoxParams, Window, WindowParams};
-use crate::storage::{Position, Store};
+use crate::query::{parse_icao24, BoxParams, PollParams, Window, WindowParams};
+use crate::storage::{Poll, Position, Store};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/aircraft/{icao24}/track", get(track))
         .route("/positions", get(positions))
+        .route("/polls", get(polls))
         .with_state(state)
 }
 
@@ -115,6 +117,37 @@ async fn positions(
         .await
         .map_err(db_error)?;
     Ok(Json(PositionsResponse::new(w, rows)))
+}
+
+#[derive(Debug, Serialize)]
+pub struct PollsResponse {
+    pub count: usize,
+    /// True if more polls are waiting after these; ask again straight away.
+    pub more: bool,
+    /// Pass as `after` on the next request: the last poll's id, or the
+    /// request's own `after` when nothing new has arrived.
+    pub next_after: Option<i64>,
+    pub polls: Vec<Poll>,
+}
+
+/// `GET /polls?after=&limit=`: the poll feed, oldest first.
+///
+/// Without `after`, the latest `limit` polls. With it, the polls stored after
+/// that id. Following `next_after` reads every poll once, in order.
+async fn polls(
+    State(s): State<AppState>,
+    Query(p): Query<PollParams>,
+) -> Result<Json<PollsResponse>, ApiError> {
+    let q = p.resolve().map_err(bad_request)?;
+    let mut rows = store(&s)?.polls(q.after, q.limit).await.map_err(db_error)?;
+    let more = rows.len() as i64 > q.limit;
+    rows.truncate(q.limit as usize);
+    Ok(Json(PollsResponse {
+        count: rows.len(),
+        more,
+        next_after: rows.last().map(|p| p.id).or(q.after),
+        polls: rows,
+    }))
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]

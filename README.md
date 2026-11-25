@@ -3,10 +3,12 @@
 [![CI](https://github.com/iosif75/aero-ingest/actions/workflows/ci.yml/badge.svg)](https://github.com/iosif75/aero-ingest/actions/workflows/ci.yml)
 
 A small Rust daemon that polls the [OpenSky Network](https://opensky-network.org) REST API for aircraft
-around Barcelona–El Prat and logs what it sees. It is the ingestion layer for Aeroscan.
+around Barcelona–El Prat and stores what it sees. It is the ingestion layer for
+[Aero-Scan](https://github.com/iosif75/aero-scan), which reads it through the [poll feed](#poll-feed).
 
 Status: steps 1–5 of the plan: OAuth2 token manager, poll loop, state-vector parsing, Postgres storage,
-retries, `/health`, Prometheus metrics, a read-only query API, storage retention, and a Grafana dashboard.
+retries, `/health`, Prometheus metrics, a read-only query API, storage retention, a Grafana dashboard, and the
+poll feed for Aero-Scan.
 
 ## Setup
 
@@ -80,13 +82,16 @@ read-only, so to change it, edit a copy in Grafana, export the JSON and replace
 |---|---|---|
 | `OPENSKY_CREDENTIALS_FILE` | – | Path to `credentials.json` (`clientId`/`clientSecret` or snake_case keys) |
 | `OPENSKY_CLIENT_ID`, `OPENSKY_CLIENT_SECRET` | – | Used if no file is set |
-| `AERO_LAMIN`, `AERO_LOMIN`, `AERO_LAMAX`, `AERO_LOMAX` | 40.9, 1.5, 41.7, 2.7 | Bounding box (degrees) |
+| `AERO_LAMIN`, `AERO_LOMIN`, `AERO_LAMAX`, `AERO_LOMAX` | 39.3, 0, 43.3, 5 | Bounding box (degrees): Aero-Scan's region |
 | `AERO_POLL_INTERVAL_SECS` | 60 | Poll interval, minimum 5 |
 | `DATABASE_URL` | – | Postgres URL; unset means log-only |
-| `AERO_HTTP_ADDR` | 127.0.0.1:9090 | Address for `/health` and `/metrics` |
+| `AERO_HTTP_ADDR` | 127.0.0.1:9090 | Address for `/health`, `/metrics`, the query API and `/polls` |
 | `AERO_RETENTION_DAYS` | 30 | Delete positions older than this many days; `0` keeps everything |
 
-At startup it logs the estimated daily credit use (1,440 with the defaults; a registered account has 4,000/day).
+The default box is Aero-Scan's monitored region: El Prat, Girona, Reus, Sabadell and Palma. At 20 square degrees it
+is still 1 credit per poll, so at startup the daemon logs an estimated 1,440 credits a day with the defaults (a
+registered account has 4,000/day). Aero-Scan should then stop polling OpenSky itself, so the credits are only spent
+once.
 
 ## Behaviour
 
@@ -100,7 +105,8 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
 - **Storage** (`src/storage.rs`, `migrations/`): table `state_vectors` with primary key `(icao24, time_position)`.
   Each snapshot is one `INSERT … SELECT FROM UNNEST(…) ON CONFLICT DO NOTHING`, so the repeated reports OpenSky
   returns until an aircraft sends a new position are dropped for free. Rows without a position are not stored.
-  A database error is logged and that snapshot is skipped; the loop keeps running.
+  A database error is logged and that snapshot is skipped; the loop keeps running. Each poll also gets a row in
+  `polls`, written in the same transaction as its positions, which is what the [poll feed](#poll-feed) follows.
 - **Retries** (`src/poller.rs`): a transient failure is retried within the same tick after 2 s, 4 s and 8 s,
   as long as the total wait stays under half the poll interval. If every retry fails, that tick is skipped.
 - **Health** (`GET /health`, `src/http.rs`): JSON with `status` and timings. `ok`, `starting` (no poll yet, within
@@ -111,8 +117,8 @@ At startup it logs the estimated daily credit use (1,440 with the defaults; a re
   retries, rows inserted/duplicate/pruned/skipped, DB errors and prune errors; gauges for aircraft and stale positions on the last poll, consecutive DB write failures, credits
   remaining, last success time and start time.
 - **Query API** (`src/http.rs`, `src/query.rs`): see below.
-- **Retention** (`src/retention.rs`): at startup and then hourly, positions older than `AERO_RETENTION_DAYS` are
-  deleted in batches of 10,000 rows so no single statement holds locks for long. A failed pass is logged and
+- **Retention** (`src/retention.rs`): at startup and then hourly, positions and polls older than
+  `AERO_RETENTION_DAYS` are deleted in batches of 10,000 rows so no single statement holds locks for long. A failed pass is logged and
   retried next hour. Progress shows up as `aero_rows_pruned_total` and `aero_prune_errors_total` in `/metrics`.
 - **Poll loop** (`src/poller.rs`): logs aircraft count, how many have a position, how many positions are stale
   (> 60 s old), how many are on the ground, and credits remaining. Ctrl+C or SIGTERM (`docker stop`) exits cleanly.
@@ -150,11 +156,47 @@ Track results are oldest first. Box results are ordered by time, then by aircraf
 `{"error": "..."}`, and with no `DATABASE_URL` the query endpoints return 503. The API has no authentication, so
 keep it on localhost (the default) or behind a reverse proxy.
 
+## Poll feed
+
+```
+GET /polls?after=&limit=
+```
+
+The feed Aero-Scan reads instead of calling OpenSky: one entry per successful poll, oldest first, each with the
+positions that poll brought in. Without `after` it returns the latest `limit` polls; with `after` it returns the
+polls stored after that `id`. `limit` defaults to 10 (max 60, an hour of polls). Pass `next_after` back as
+`after` to read the next ones, and ask again straight away while `more` is `true`.
+
+```json
+{
+  "count": 1, "more": false, "next_after": 4213,
+  "polls": [
+    { "id": 4213, "snapshot_time": 1731400000, "aircraft": 64, "credits_remaining": 3421,
+      "bbox": { "lamin": 39.3, "lomin": 0.0, "lamax": 43.3, "lomax": 5.0 },
+      "positions": [
+        { "icao24": "3423c4", "time": 1731399995, "callsign": "VLG12AB", "latitude": 41.2971, "longitude": 2.0785,
+          "baro_altitude": 1150.6, "geo_altitude": 1188.7, "velocity": 92.5, "true_track": 248.1,
+          "vertical_rate": -4.2, "on_ground": false, "squawk": "1000", "category": 4 }
+      ] }
+  ]
+}
+```
+
+- **Complete polls only.** A poll's row and its positions are committed together, so a poll in the feed never gains
+  positions later. Following `next_after` reads every poll exactly once, in order.
+- **Each report once.** `positions` holds the reports first stored by that poll. A report OpenSky repeats because
+  the aircraft hasn't sent a new position belongs to the earlier poll, so it isn't repeated. Positions without
+  coordinates are never stored; `aircraft` counts every state vector in the response.
+- **Gaps are real.** A failed or rate-limited poll, or one whose write failed, has no entry. Compare
+  `snapshot_time` values to spot them. Polls older than the retention period drop out of the feed.
+- **Units are OpenSky's**: metres, m/s and degrees, as in the query API. Converting to feet and knots is up to the
+  reader.
+
 ## Tests
 
 `cargo test` runs unit tests plus integration tests against a fake OpenSky server on localhost
 (token caching, 401 retry, fatal 401, 429 retry header, connection errors, retry after a 503, the `/health`
-and `/metrics` endpoints, and query parameter validation). They don't touch the real API.
+and `/metrics` endpoints, and query and feed parameter validation). They don't touch the real API.
 
 Storage and query API tests need a Postgres and are skipped otherwise:
 

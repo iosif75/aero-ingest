@@ -6,7 +6,8 @@
 
 mod common;
 
-use aero_ingest::storage::{Store, WriteStats, MIGRATOR};
+use aero_ingest::config::BoundingBox;
+use aero_ingest::storage::{NewPoll, Store, WriteStats, MIGRATOR};
 use common::snapshot;
 use sqlx::Row;
 
@@ -200,4 +201,105 @@ async fn missing_position_source_is_stored_as_null() {
         .await
         .unwrap();
     assert_eq!(ps, None);
+}
+
+fn new_poll(snapshot_time: i64, credits: Option<i64>) -> NewPoll {
+    NewPoll {
+        snapshot_time,
+        credits_remaining: credits,
+        bbox: BoundingBox::AEROSCAN,
+    }
+}
+
+#[tokio::test]
+async fn polls_carry_the_reports_they_brought_in() {
+    let Some(store) = store().await else {
+        return;
+    };
+    let a = snapshot(FIRST);
+    store
+        .store_poll(&new_poll(a.time, Some(3999)), &a.states)
+        .await
+        .unwrap();
+    let b = snapshot(SECOND);
+    store
+        .store_poll(&new_poll(b.time, Some(3998)), &b.states)
+        .await
+        .unwrap();
+    // A poll with no aircraft is still part of the feed.
+    store
+        .store_poll(&new_poll(b.time + 60, None), &[])
+        .await
+        .unwrap();
+
+    let polls = store.polls(None, 10).await.unwrap();
+    assert_eq!(polls.len(), 3);
+    assert!(polls.windows(2).all(|w| w[0].id < w[1].id), "oldest first");
+
+    let p = &polls[0];
+    assert_eq!(p.snapshot_time, 1731400000);
+    assert_eq!(p.aircraft, 3, "counts the state without a position too");
+    assert_eq!(p.credits_remaining, Some(3999));
+    assert_eq!(p.bbox, BoundingBox::AEROSCAN);
+    let icaos: Vec<&str> = p.positions.iter().map(|x| x.icao24.as_str()).collect();
+    assert_eq!(icaos, ["3423c4", "4ca7b5"]);
+
+    // 4ca7b5 repeated its old report, which stays with the first poll.
+    let p = &polls[1];
+    assert_eq!(p.aircraft, 2);
+    assert_eq!(p.positions.len(), 1);
+    assert_eq!(p.positions[0].icao24, "3423c4");
+    assert_eq!(p.positions[0].time, 1731400055);
+
+    assert!(polls[2].positions.is_empty());
+    assert_eq!(polls[2].credits_remaining, None);
+
+    // Following by id, with a limit: fetches one extra to signal more.
+    let after_first = store.polls(Some(polls[0].id), 1).await.unwrap();
+    assert_eq!(after_first.len(), 2);
+    assert_eq!(after_first[0].id, polls[1].id);
+    assert!(store.polls(Some(polls[2].id), 5).await.unwrap().is_empty());
+
+    // Latest only.
+    let latest = store.polls(None, 1).await.unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].id, polls[2].id);
+}
+
+#[tokio::test]
+async fn a_repeated_snapshot_time_adds_no_second_poll() {
+    let Some(store) = store().await else {
+        return;
+    };
+    let a = snapshot(FIRST);
+    store
+        .store_poll(&new_poll(a.time, None), &a.states)
+        .await
+        .unwrap();
+    let w = store
+        .store_poll(&new_poll(a.time, None), &a.states)
+        .await
+        .unwrap();
+    assert_eq!(w.inserted, 0);
+    assert_eq!(store.polls(None, 10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn prune_drops_old_polls_from_the_feed() {
+    let Some(store) = store().await else {
+        return;
+    };
+    let a = snapshot(FIRST);
+    store
+        .store_poll(&new_poll(a.time, None), &a.states)
+        .await
+        .unwrap();
+    store
+        .store_poll(&new_poll(a.time + 600, None), &[])
+        .await
+        .unwrap();
+    store.prune_older_than(a.time + 1, 100).await.unwrap();
+    let left = store.polls(None, 10).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].snapshot_time, a.time + 600);
 }

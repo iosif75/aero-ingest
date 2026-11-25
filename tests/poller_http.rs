@@ -64,6 +64,45 @@ async fn retries_transient_failure_within_the_tick() {
 }
 
 #[tokio::test]
+async fn each_poll_lands_in_the_feed() {
+    let Some(store) = common::test_store().await else {
+        eprintln!("TEST_DATABASE_URL not set, skipping");
+        return;
+    };
+    let (base, _) = flaky_server(0).await;
+    let cl = client(&base);
+    let metrics = Metrics::default();
+    let m = &metrics;
+    let stop = async {
+        while m.rows_inserted.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        poller::run(
+            &cl,
+            Some(&store),
+            m,
+            BoundingBox::AEROSCAN,
+            Duration::from_secs(60),
+            stop,
+        ),
+    )
+    .await
+    .expect("first poll should be stored");
+
+    let polls = store.polls(None, 10).await.unwrap();
+    assert_eq!(polls.len(), 1);
+    let p = &polls[0];
+    assert_eq!(p.snapshot_time, 1731400000);
+    assert_eq!(p.credits_remaining, Some(3990));
+    assert_eq!(p.bbox, BoundingBox::AEROSCAN);
+    assert_eq!(p.positions.len(), 1);
+    assert_eq!(p.positions[0].icao24, "3423c4");
+}
+
+#[tokio::test]
 async fn health_and_metrics_endpoints() {
     let metrics = Arc::new(Metrics::default());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
