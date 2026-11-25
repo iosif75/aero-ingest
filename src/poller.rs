@@ -4,7 +4,7 @@ use crate::client::{FetchError, OpenSkyClient, Snapshot};
 use crate::config::BoundingBox;
 use crate::metrics::{now_unix, Metrics};
 use crate::model::StateVector;
-use crate::storage::Store;
+use crate::storage::{NewPoll, Store};
 use std::future::Future;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
@@ -112,7 +112,7 @@ pub async fn run(
                     .rows_skipped
                     .fetch_add(snap.response.skipped as u64, Relaxed);
                 if let Some(store) = store {
-                    persist(store, metrics, &snap).await;
+                    persist(store, metrics, &snap, bbox).await;
                 }
             }
             Err(FetchError::Fatal(msg)) => return Exit::Fatal(msg),
@@ -137,11 +137,17 @@ pub async fn run(
     }
 }
 
-/// Write a snapshot. A database error is logged and the poll loop carries on;
-/// that snapshot is lost, which is acceptable for a 60 s sampled feed.
-async fn persist(store: &Store, metrics: &Metrics, snap: &Snapshot) {
+/// Write a snapshot and add it to the poll feed. A database error is logged
+/// and the poll loop carries on; that snapshot is lost, which is acceptable
+/// for a 60 s sampled feed, and feed readers see a gap of one poll.
+async fn persist(store: &Store, metrics: &Metrics, snap: &Snapshot, bbox: BoundingBox) {
     let r = &snap.response;
-    match store.insert_snapshot(r.time, &r.states).await {
+    let poll = NewPoll {
+        snapshot_time: r.time,
+        credits_remaining: snap.credits_remaining,
+        bbox,
+    };
+    match store.store_poll(&poll, &r.states).await {
         Ok(w) => {
             let dup = w.candidates as u64 - w.inserted;
             metrics.record_db_ok();

@@ -87,7 +87,7 @@ impl Credentials {
 }
 
 /// Geographic box in decimal degrees.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct BoundingBox {
     pub lamin: f64,
     pub lomin: f64,
@@ -96,6 +96,16 @@ pub struct BoundingBox {
 }
 
 impl BoundingBox {
+    /// Aero-Scan's monitored region, 39.3–43.3°N, 0–5°E: El Prat, Girona,
+    /// Reus, Sabadell and Palma. 20 square degrees, so still 1 credit a poll.
+    /// The default, since the daemon is Aero-Scan's ingestion layer.
+    pub const AEROSCAN: Self = Self {
+        lamin: 39.3,
+        lomin: 0.0,
+        lamax: 43.3,
+        lomax: 5.0,
+    };
+
     /// Roughly 0.8 x 1.2 degrees around El Prat (BCN).
     pub const EL_PRAT: Self = Self {
         lamin: 40.9,
@@ -219,7 +229,7 @@ impl Config {
             },
         };
 
-        let d = BoundingBox::EL_PRAT;
+        let d = BoundingBox::AEROSCAN;
         let bbox = BoundingBox {
             lamin: parse_var(&get, "AERO_LAMIN", d.lamin)?,
             lomin: parse_var(&get, "AERO_LOMIN", d.lomin)?,
@@ -302,7 +312,7 @@ mod tests {
             ("OPENSKY_CLIENT_SECRET", "s"),
         ]))
         .unwrap();
-        assert_eq!(c.bbox, BoundingBox::EL_PRAT);
+        assert_eq!(c.bbox, BoundingBox::AEROSCAN);
         assert_eq!(c.estimated_daily_credits(), 1440);
     }
 
@@ -319,7 +329,7 @@ mod tests {
         let r = Config::from_lookup(lookup(&[
             ("OPENSKY_CLIENT_ID", "id"),
             ("OPENSKY_CLIENT_SECRET", "s"),
-            ("AERO_LAMIN", "42"),
+            ("AERO_LAMIN", "44"),
         ]));
         assert!(matches!(r, Err(ConfigError::BadBox(_))));
     }

@@ -1470,8 +1470,8 @@
         "view": {
           "id": "coords",
           "lat": 41.3,
-          "lon": 2.1,
-          "zoom": 9,
+          "lon": 2.5,
+          "zoom": 7,
           "allLayers": true
         },
         "controls": {

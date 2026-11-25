@@ -91,6 +91,40 @@ impl BoxParams {
     }
 }
 
+/// Polls returned by `/polls` when `limit` is omitted.
+pub const DEFAULT_POLL_LIMIT: i64 = 10;
+/// At most an hour of 60 s polls per request.
+pub const MAX_POLL_LIMIT: i64 = 60;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PollParams {
+    /// Return polls with an `id` above this. Omit it for the latest polls.
+    pub after: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollQuery {
+    pub after: Option<i64>,
+    pub limit: i64,
+}
+
+impl PollParams {
+    pub fn resolve(&self) -> Result<PollQuery, String> {
+        if self.after.is_some_and(|a| a < 0) {
+            return Err("`after` must not be negative".into());
+        }
+        let limit = self.limit.unwrap_or(DEFAULT_POLL_LIMIT);
+        if !(1..=MAX_POLL_LIMIT).contains(&limit) {
+            return Err(format!("`limit` must be between 1 and {MAX_POLL_LIMIT}"));
+        }
+        Ok(PollQuery {
+            after: self.after,
+            limit,
+        })
+    }
+}
+
 /// Normalise and check an ICAO 24-bit address: six hex digits, lowercased.
 pub fn parse_icao24(raw: &str) -> Result<String, String> {
     let s = raw.trim().to_ascii_lowercase();
@@ -104,6 +138,22 @@ pub fn parse_icao24(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poll_params_defaults_and_bounds() {
+        let p = |after, limit| PollParams { after, limit }.resolve();
+        assert_eq!(
+            p(None, None).unwrap(),
+            PollQuery {
+                after: None,
+                limit: DEFAULT_POLL_LIMIT
+            }
+        );
+        assert_eq!(p(Some(0), Some(MAX_POLL_LIMIT)).unwrap().after, Some(0));
+        assert!(p(Some(-1), None).is_err());
+        assert!(p(None, Some(0)).is_err());
+        assert!(p(None, Some(MAX_POLL_LIMIT + 1)).is_err());
+    }
 
     #[test]
     fn window_defaults_to_last_two_hours() {
