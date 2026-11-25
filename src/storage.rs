@@ -3,6 +3,7 @@
 use crate::config::BoundingBox;
 use crate::model::{PositionSource, StateVector};
 use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
+use sqlx::AssertSqlSafe;
 use std::time::Duration;
 
 /// Migrations embedded at compile time from `migrations/`.
@@ -259,11 +260,11 @@ impl Store {
         to: i64,
         limit: i64,
     ) -> Result<Vec<Position>, sqlx::Error> {
-        sqlx::query_as::<_, Position>(&format!(
+        sqlx::query_as::<_, Position>(AssertSqlSafe(format!(
             "SELECT {POSITION_COLUMNS} FROM state_vectors \
              WHERE icao24 = $1 AND time_position BETWEEN to_timestamp($2) AND to_timestamp($3) \
              ORDER BY time_position LIMIT $4"
-        ))
+        )))
         .bind(icao24)
         .bind(from as f64)
         .bind(to as f64)
@@ -281,12 +282,12 @@ impl Store {
         to: i64,
         limit: i64,
     ) -> Result<Vec<Position>, sqlx::Error> {
-        sqlx::query_as::<_, Position>(&format!(
+        sqlx::query_as::<_, Position>(AssertSqlSafe(format!(
             "SELECT {POSITION_COLUMNS} FROM state_vectors \
              WHERE time_position BETWEEN to_timestamp($1) AND to_timestamp($2) \
                AND latitude BETWEEN $3 AND $4 AND longitude BETWEEN $5 AND $6 \
              ORDER BY time_position, icao24 LIMIT $7"
-        ))
+        )))
         .bind(from as f64)
         .bind(to as f64)
         .bind(bbox.lamin)
@@ -346,19 +347,19 @@ impl Store {
     pub async fn polls(&self, after: Option<i64>, limit: i64) -> Result<Vec<Poll>, sqlx::Error> {
         let rows: Vec<PollRow> = match after {
             Some(after) => {
-                sqlx::query_as(&format!(
+                sqlx::query_as(AssertSqlSafe(format!(
                     "SELECT {POLL_COLUMNS} FROM polls WHERE id > $1 ORDER BY id LIMIT $2"
-                ))
+                )))
                 .bind(after)
                 .bind(limit + 1)
                 .fetch_all(&self.pool)
                 .await?
             }
             None => {
-                sqlx::query_as(&format!(
+                sqlx::query_as(AssertSqlSafe(format!(
                     "SELECT * FROM (SELECT {POLL_COLUMNS} FROM polls ORDER BY id DESC LIMIT $1) p \
                      ORDER BY id"
-                ))
+                )))
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await?
@@ -372,12 +373,12 @@ impl Store {
             .fold((first.snapshot_time, last.snapshot_time), |(lo, hi), r| {
                 (lo.min(r.snapshot_time), hi.max(r.snapshot_time))
             });
-        let positions: Vec<PositionInPoll> = sqlx::query_as(&format!(
+        let positions: Vec<PositionInPoll> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT extract(epoch FROM snapshot_time)::bigint AS snapshot, {POSITION_COLUMNS} \
              FROM state_vectors \
              WHERE snapshot_time BETWEEN to_timestamp($1) AND to_timestamp($2) \
              ORDER BY snapshot_time, icao24"
-        ))
+        )))
         .bind(lo as f64)
         .bind(hi as f64)
         .fetch_all(&self.pool)
